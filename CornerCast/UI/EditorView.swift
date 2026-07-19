@@ -71,7 +71,6 @@ struct EditorView: View {
                 PresetListView(viewModel: viewModel)
             }
         }
-        .navigationViewStyle(.stack)
     }
 
     /// 出力状態インジケータ(F-OUT-3): 緑●=接続中(解像度表示)、灰●=未接続

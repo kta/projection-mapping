@@ -2,18 +2,237 @@ import SwiftUI
 
 /// インスペクタ(F-UI-3/4/5、F-WARP-5/6)。選択中の面・頂点に対する精密操作。
 ///
-/// TODO(TASK UI-2 / 担当: ui agent):
-/// セクション構成(Form):
-/// 1. 選択中の面/頂点の表示。頂点座標の数値表示+TextFieldで直接入力(F-UI-5、0-1範囲検証)。
-/// 2. 微調整十字キー(F-UI-3): ↑↓←→ボタン。タップで viewModel.nudge(dx:dy:) ±1、
-///    長押しでリピート(0.1秒間隔)。
-/// 3. 面の明るさ/ガンマ Slider(F-WARP-6): brightness 0.25-2.0、gamma 0.25-4.0。
-/// 4. 頂点リンク(F-WARP-5): preset.links を Toggle で列挙(viewModel.setLink(id:enabled:))。
-/// 5. リセット(面単位/全体)+アンドゥボタン(canUndoで活性制御)+編集ロックToggle。
+/// セクション構成(TASK UI-2):
+/// 1. 選択中の面/頂点の座標数値表示+直接入力(F-UI-5)
+/// 2. 微調整十字キー(F-UI-3): タップで±1px、長押しでリピート
+/// 3. 面の明るさ/ガンマ Slider(F-WARP-6)
+/// 4. 頂点リンク Toggle(F-WARP-5)
+/// 5. リセット(面/全体)+アンドゥ+編集ロック(F-UI-4/6)
 struct InspectorView: View {
     @Bindable var viewModel: MappingViewModel
 
     var body: some View {
-        Text("TODO: UI-2 InspectorView") // TODO: UI-2
+        Form {
+            selectionSection
+            nudgeSection
+            colorSection
+            linkSection
+            resetSection
+        }
+    }
+
+    // MARK: 1. 選択中の頂点座標(F-UI-5)
+
+    @ViewBuilder private var selectionSection: some View {
+        Section("選択中の頂点") {
+            if let s = viewModel.selectedSurface, let c = viewModel.selectedCorner {
+                Text("\(s.displayName) / \(cornerName(c))")
+                    .font(.subheadline).bold()
+                HStack {
+                    Text("X")
+                    TextField("X", value: coordBinding(s, c, axis: .horizontal),
+                              format: .number.precision(.fractionLength(3)))
+                        .multilineTextAlignment(.trailing)
+                        .keyboardType(.decimalPad)
+                }
+                HStack {
+                    Text("Y")
+                    TextField("Y", value: coordBinding(s, c, axis: .vertical),
+                              format: .number.precision(.fractionLength(3)))
+                        .multilineTextAlignment(.trailing)
+                        .keyboardType(.decimalPad)
+                }
+            } else {
+                Text("キャンバス上の点を選択してください")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+        }
+    }
+
+    // MARK: 2. 微調整十字キー(F-UI-3)
+
+    @ViewBuilder private var nudgeSection: some View {
+        Section("微調整(±1px)") {
+            if let s = viewModel.selectedSurface, let c = viewModel.selectedCorner {
+                VStack(spacing: 8) {
+                    NudgeButton(systemName: "arrow.up") { viewModel.nudge(corner: c, of: s, dx: 0, dy: -1) }
+                    HStack(spacing: 24) {
+                        NudgeButton(systemName: "arrow.left") { viewModel.nudge(corner: c, of: s, dx: -1, dy: 0) }
+                        NudgeButton(systemName: "arrow.right") { viewModel.nudge(corner: c, of: s, dx: 1, dy: 0) }
+                    }
+                    NudgeButton(systemName: "arrow.down") { viewModel.nudge(corner: c, of: s, dx: 0, dy: 1) }
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(viewModel.isEditLocked)
+            } else {
+                Text("点を選択すると微調整できます")
+                    .foregroundStyle(.secondary).font(.caption)
+            }
+        }
+    }
+
+    // MARK: 3. 明るさ/ガンマ(F-WARP-6)
+
+    @ViewBuilder private var colorSection: some View {
+        if let s = viewModel.selectedSurface {
+            Section("\(s.displayName)の補正") {
+                VStack(alignment: .leading) {
+                    Text("明るさ \(brightnessBinding(s).wrappedValue, format: .number.precision(.fractionLength(2)))")
+                        .font(.caption)
+                    Slider(value: brightnessBinding(s), in: 0.25...2.0)
+                }
+                VStack(alignment: .leading) {
+                    Text("ガンマ \(gammaBinding(s).wrappedValue, format: .number.precision(.fractionLength(2)))")
+                        .font(.caption)
+                    Slider(value: gammaBinding(s), in: 0.25...4.0)
+                }
+            }
+        }
+    }
+
+    // MARK: 4. 頂点リンク(F-WARP-5)
+
+    @ViewBuilder private var linkSection: some View {
+        Section("頂点リンク") {
+            if viewModel.preset.links.isEmpty {
+                Text("リンクはありません").foregroundStyle(.secondary).font(.caption)
+            }
+            ForEach(viewModel.preset.links) { link in
+                Toggle(isOn: linkBinding(link)) {
+                    Text(linkLabel(link)).font(.caption)
+                }
+            }
+        }
+    }
+
+    // MARK: 5. リセット / アンドゥ / ロック(F-UI-4/6)
+
+    @ViewBuilder private var resetSection: some View {
+        Section {
+            Button {
+                viewModel.undo()
+            } label: {
+                Label("元に戻す", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(!viewModel.canUndo)
+
+            Button {
+                if let s = viewModel.selectedSurface { viewModel.resetSurface(s) }
+            } label: {
+                Label("この面をリセット", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(viewModel.selectedSurface == nil)
+
+            Button(role: .destructive) {
+                viewModel.resetAll()
+            } label: {
+                Label("全てリセット", systemImage: "trash")
+            }
+        }
+        Section {
+            Toggle(isOn: $viewModel.isEditLocked) {
+                Label("編集ロック", systemImage: "lock")
+            }
+        }
+    }
+
+    // MARK: - バインディング / ラベル
+
+    /// 頂点座標のバインディング。set時は beginGesture→move でクランプ・リンク解決・アンドゥを通す。
+    private func coordBinding(_ s: Surface, _ c: Quad.Corner, axis: Axis) -> Binding<Double> {
+        Binding(
+            get: {
+                let p = viewModel.preset.surfaces[s]?.quad[c] ?? .zero
+                return axis == .horizontal ? Double(p.x) : Double(p.y)
+            },
+            set: { v in
+                guard let p = viewModel.preset.surfaces[s]?.quad[c] else { return }
+                viewModel.beginGesture()
+                let np = axis == .horizontal
+                    ? CGPoint(x: v, y: p.y)
+                    : CGPoint(x: p.x, y: v)
+                viewModel.move(corner: c, of: s, to: np)
+            }
+        )
+    }
+
+    // 明るさ/ガンマは preset を直接更新(didSetで自動保存)。
+    // TODO(UI-2): これらは pushUndo を通らないためアンドゥ非対応。
+    //   ViewModelに公開のpushUndoが無いので現状は割り切り。必要なら要相談。
+    private func brightnessBinding(_ s: Surface) -> Binding<Double> {
+        Binding(
+            get: { viewModel.preset.surfaces[s]?.brightness ?? 1.0 },
+            set: { viewModel.preset.surfaces[s]?.brightness = $0 }
+        )
+    }
+
+    private func gammaBinding(_ s: Surface) -> Binding<Double> {
+        Binding(
+            get: { viewModel.preset.surfaces[s]?.gamma ?? 1.0 },
+            set: { viewModel.preset.surfaces[s]?.gamma = $0 }
+        )
+    }
+
+    private func linkBinding(_ link: CornerLink) -> Binding<Bool> {
+        Binding(
+            get: { link.enabled },
+            set: { viewModel.setLink(id: link.id, enabled: $0) }
+        )
+    }
+
+    private func linkLabel(_ link: CornerLink) -> String {
+        "\(link.a.surface.displayName)・\(cornerName(link.a.corner)) ↔ "
+            + "\(link.b.surface.displayName)・\(cornerName(link.b.corner))"
+    }
+
+    private func cornerName(_ c: Quad.Corner) -> String {
+        switch c {
+        case .topLeft: return "左上"
+        case .topRight: return "右上"
+        case .bottomRight: return "右下"
+        case .bottomLeft: return "左下"
+        }
+    }
+}
+
+// MARK: - 微調整ボタン(タップ=単発、長押し=リピート)
+
+/// 十字キー1つぶん。タップで1回、長押しで0.1秒間隔のリピート(F-UI-3)。
+private struct NudgeButton: View {
+    let systemName: String
+    let action: () -> Void
+
+    @State private var timer: Timer?
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.title2)
+            .frame(width: 44, height: 44)
+            .background(Color.secondary.opacity(0.15))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                action()
+            }
+            .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 20) {
+                // 長押し確定 → リピート開始
+                startRepeat()
+            } onPressingChanged: { pressing in
+                if !pressing { stopRepeat() }
+            }
+    }
+
+    private func startRepeat() {
+        stopRepeat()
+        action()   // 確定直後に1発
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            action()
+        }
+    }
+
+    private func stopRepeat() {
+        timer?.invalidate()
+        timer = nil
     }
 }
