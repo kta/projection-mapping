@@ -227,7 +227,8 @@ private struct NudgeButton: View {
         stopRepeat()
         action()   // 確定直後に1発
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            action()
+            // Timerコールバックはnonisolated。メインスレッドで発火するためassumeIsolatedで包む。
+            MainActor.assumeIsolated { action() }
         }
     }
 

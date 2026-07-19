@@ -44,6 +44,11 @@ final class MappingViewModel {
 
     // MARK: 依存
 
+    /// 現在アクティブな動画ソース(ExternalDisplayManagerが結線時に設定・解除する)。
+    /// UIのトランスポート(TransportView)が再生制御(play/pause/seek)に使う。
+    /// 再生状態の表示はUI側ローカル状態でよいため観測対象にしない。
+    @ObservationIgnored weak var activeVideoSource: VideoSource?
+
     @ObservationIgnored private let presetStore: PresetStoreProtocol
     @ObservationIgnored private var undoStack: [MappingPreset] = []
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?

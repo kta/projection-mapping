@@ -92,6 +92,7 @@ final class ExternalDisplayManager {
         stopBakedPlayback()
         videoSource?.pause()
         videoSource = nil
+        viewModel.activeVideoSource = nil
         testPattern = nil
         host = nil
         screen = nil
@@ -155,6 +156,7 @@ final class ExternalDisplayManager {
         // 直前の実時間ソースを停止
         videoSource?.pause()
         videoSource = nil
+        viewModel.activeVideoSource = nil
         testPattern = nil
 
         switch viewModel.outputMode {
@@ -188,6 +190,8 @@ final class ExternalDisplayManager {
             vs.volume = Float(viewModel.preset.volume)
             vs.play()
             videoSource = vs
+            // UIのトランスポートから同一インスタンスを制御できるよう公開する(結線契約)
+            viewModel.activeVideoSource = vs
             return vs
         case .bakedVideo:
             // ベイク済み動画はベイク再生モード(AVPlayerLayer)で扱う。実時間パスでは表示しない。

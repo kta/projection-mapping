@@ -2,18 +2,165 @@ import SwiftUI
 
 /// トランスポートバー(F-SRC-4)+ベイク操作(F-BAKE系)。
 ///
-/// TODO(TASK UI-2 / 担当: ui agent):
-/// - 再生/一時停止・シークSlider・ループToggle・音量Slider。
-///   VideoSourceの制御はViewModel経由にしたいが、初版はAppServices.sharedの
-///   現在のFrameSourceを直接叩く形でもよい(TODOコメントを残すこと)。
-/// - ベイク: 「この設定で書き出し」ボタン → 確認ダイアログ(解像度選択: 1080p/4K)
-///   → BakeExporter.export を Task で実行、ProgressViewをオーバーレイ表示、キャンセル可。
-/// - 書き出し完了後は outputMode を .bakedPlayback に切替提案するアラートを出す。
-/// - ベイクが陳腐化している場合(BakeStore.isStale)は「再書き出しが必要」バッジ表示(F-BAKE-3)。
+/// 実装方針(TASK UI-2):
+/// - 再生/一時停止・シーク・ループ・音量。
+/// - ベイク: 解像度選択→BakeExporter.export を Task 実行、進捗オーバーレイ+キャンセル。
+/// - 完了後は .bakedPlayback への切替をアラート提案。stale時は再書き出しバッジ(F-BAKE-3)。
 struct TransportView: View {
     @Bindable var viewModel: MappingViewModel
 
+    // TODO(UI-2): 再生状態・再生位置は本来 FrameSource(VideoSource)が保持する。
+    //   しかし現状 ViewModel / AppServices から「現在のFrameSource」へアクセスする公開APIが
+    //   無いため、play/pause・シークはローカルUI状態に留める。実再生制御は
+    //   ENG-2(VideoSource)/EXT-1(ExternalDisplayManager)の結線後に接続する。
+    @State private var isPlaying = false
+    @State private var seekPosition: Double = 0
+
+    // ベイク
+    @State private var bakeStore = BakeStore()
+    @State private var showBakeDialog = false
+    @State private var isExporting = false
+    @State private var exportProgress: Double = 0
+    @State private var exportTask: Task<Void, Never>?
+    @State private var exporter: BakeExporter?
+    @State private var showCompletionAlert = false
+    @State private var errorMessage: String?
+
     var body: some View {
-        Text("TODO: UI-2 TransportView") // TODO: UI-2
+        HStack(spacing: 16) {
+            // 再生/一時停止
+            Button {
+                isPlaying.toggle()
+                // TODO(UI-2): FrameSource.play()/pause() を呼ぶ(結線待ち)
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.title2)
+            }
+
+            // シーク
+            Slider(value: $seekPosition, in: 0...1)
+            // TODO(UI-2): 実尺・再生位置に接続(VideoSource.seek(to:))
+
+            // ループ(F-SRC-3)。presetに永続化される。
+            Toggle(isOn: $viewModel.preset.loop) {
+                Image(systemName: "repeat")
+            }
+            .toggleStyle(.button)
+
+            // 音量(F-SRC-4)。presetに永続化される。
+            HStack(spacing: 6) {
+                Image(systemName: "speaker.fill").foregroundStyle(.secondary)
+                Slider(value: $viewModel.preset.volume, in: 0...1)
+                    .frame(width: 120)
+            }
+
+            Divider().frame(height: 24)
+
+            bakeControls
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .overlay { if isExporting { exportOverlay } }
+        .confirmationDialog("書き出し解像度", isPresented: $showBakeDialog, titleVisibility: .visible) {
+            Button("1080p (1920×1080)") { startBake(size: CGSize(width: 1920, height: 1080)) }
+            Button("4K (3840×2160)") { startBake(size: CGSize(width: 3840, height: 2160)) }
+            Button("キャンセル", role: .cancel) {}
+        }
+        .alert("書き出し完了", isPresented: $showCompletionAlert) {
+            Button("ベイク再生に切替") { viewModel.outputMode = .bakedPlayback }
+            Button("そのまま", role: .cancel) {}
+        } message: {
+            Text("合成済み動画の書き出しが完了しました。ベイク再生モードに切り替えますか?")
+        }
+        .alert("書き出しエラー",
+               isPresented: Binding(get: { errorMessage != nil },
+                                    set: { if !$0 { errorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    // MARK: ベイク操作
+
+    @ViewBuilder private var bakeControls: some View {
+        if isStaleBakeExists {
+            // F-BAKE-3: プリセット変更でベイクが陳腐化
+            Label("再書き出しが必要", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        Button {
+            showBakeDialog = true
+        } label: {
+            Label("この設定で書き出し", systemImage: "square.and.arrow.down.on.square")
+        }
+        .disabled(bakeableURL == nil || isExporting)
+    }
+
+    private var exportOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.4).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView(value: exportProgress) {
+                    Text("書き出し中… \(Int(exportProgress * 100))%")
+                }
+                .frame(width: 240)
+                Button("キャンセル", role: .cancel) { cancelBake() }
+            }
+            .padding(24)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    // MARK: ロジック
+
+    /// ベイク対象URL(動画ソースのときのみ)
+    private var bakeableURL: URL? {
+        if case .video(let url) = viewModel.contentSource { return url }
+        return nil
+    }
+
+    /// 現在のプリセットに対して陳腐化しているベイクが存在するか(F-BAKE-3)
+    private var isStaleBakeExists: Bool {
+        // BakeStore.list() は ENG-5 未実装のうちは空を返す。
+        bakeStore.list().contains { bakeStore.isStale($0, currentPreset: viewModel.preset) }
+    }
+
+    private func startBake(size: CGSize) {
+        guard let url = bakeableURL else { return }
+        let ex = BakeExporter(composer: AppServices.shared.composer)
+        ex.progressHandler = { p in
+            Task { @MainActor in exportProgress = p }
+        }
+        exporter = ex
+        exportProgress = 0
+        isExporting = true
+
+        exportTask = Task {
+            do {
+                let record = try await ex.export(sourceURL: url,
+                                                 preset: viewModel.preset,
+                                                 outputSize: size)
+                try? bakeStore.add(record)
+                await MainActor.run {
+                    isExporting = false
+                    showCompletionAlert = true
+                }
+            } catch is CancellationError {
+                await MainActor.run { isExporting = false }
+            } catch {
+                await MainActor.run {
+                    isExporting = false
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func cancelBake() {
+        exporter?.cancel()
+        exportTask?.cancel()
+        isExporting = false
     }
 }
