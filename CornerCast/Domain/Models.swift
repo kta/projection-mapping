@@ -105,7 +105,8 @@ struct CornerLink: Codable, Equatable, Identifiable, Sendable {
 }
 
 /// キャリブレーション一式。プリセットJSON(F-PRESET系)のルート。
-struct MappingPreset: Codable, Equatable, Sendable {
+/// Identifiable準拠はプリセット一覧(ForEach)用 — idプロパティで自動満足。
+struct MappingPreset: Codable, Equatable, Identifiable, Sendable {
     static let currentSchemaVersion = 1
 
     var schemaVersion: Int = MappingPreset.currentSchemaVersion
