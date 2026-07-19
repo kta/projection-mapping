@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 /// トランスポートバー(F-SRC-4)+ベイク操作(F-BAKE系)。
 ///
@@ -9,10 +10,8 @@ import SwiftUI
 struct TransportView: View {
     @Bindable var viewModel: MappingViewModel
 
-    // TODO(UI-2): 再生状態・再生位置は本来 FrameSource(VideoSource)が保持する。
-    //   しかし現状 ViewModel / AppServices から「現在のFrameSource」へアクセスする公開APIが
-    //   無いため、play/pause・シークはローカルUI状態に留める。実再生制御は
-    //   ENG-2(VideoSource)/EXT-1(ExternalDisplayManager)の結線後に接続する。
+    // 再生制御は viewModel.activeVideoSource(ExternalDisplayManagerが結線時に設定)へ委譲する。
+    // 再生状態の表示はUIローカルで保持する(ソース側に状態購読APIを持たせない割り切り)。
     @State private var isPlaying = false
     @State private var seekPosition: Double = 0
 
@@ -24,6 +23,7 @@ struct TransportView: View {
     @State private var exportTask: Task<Void, Never>?
     @State private var exporter: BakeExporter?
     @State private var showCompletionAlert = false
+    @State private var lastBakeRecord: BakeRecord?
     @State private var errorMessage: String?
 
     var body: some View {
@@ -31,15 +31,20 @@ struct TransportView: View {
             // 再生/一時停止
             Button {
                 isPlaying.toggle()
-                // TODO(UI-2): FrameSource.play()/pause() を呼ぶ(結線待ち)
+                if isPlaying {
+                    viewModel.activeVideoSource?.play()
+                } else {
+                    viewModel.activeVideoSource?.pause()
+                }
             } label: {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                     .font(.title2)
             }
 
-            // シーク
-            Slider(value: $seekPosition, in: 0...1)
-            // TODO(UI-2): 実尺・再生位置に接続(VideoSource.seek(to:))
+            // シーク(ドラッグ確定時に実尺換算でシークする)
+            Slider(value: $seekPosition, in: 0...1) { editing in
+                if !editing { seek(toFraction: seekPosition) }
+            }
 
             // ループ(F-SRC-3)。presetに永続化される。
             Toggle(isOn: $viewModel.preset.loop) {
@@ -60,6 +65,10 @@ struct TransportView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
+        // 音量変更を再生中ソースへ即時反映(presetへの永続化はBinding側で行われる)
+        .onChange(of: viewModel.preset.volume) { _, v in
+            viewModel.activeVideoSource?.volume = Float(v)
+        }
         .overlay { if isExporting { exportOverlay } }
         .confirmationDialog("書き出し解像度", isPresented: $showBakeDialog, titleVisibility: .visible) {
             Button("1080p (1920×1080)") { startBake(size: CGSize(width: 1920, height: 1080)) }
@@ -67,7 +76,14 @@ struct TransportView: View {
             Button("キャンセル", role: .cancel) {}
         }
         .alert("書き出し完了", isPresented: $showCompletionAlert) {
-            Button("ベイク再生に切替") { viewModel.outputMode = .bakedPlayback }
+            Button("ベイク再生に切替") {
+                // 結線契約: ベイク再生への切替時はUI側がcontentSourceも設定する
+                // (ExternalDisplayManagerは .bakedVideo(url) を待ち受けるだけ)
+                if let record = lastBakeRecord {
+                    viewModel.contentSource = .bakedVideo(record.fileURL)
+                }
+                viewModel.outputMode = .bakedPlayback
+            }
             Button("そのまま", role: .cancel) {}
         } message: {
             Text("合成済み動画の書き出しが完了しました。ベイク再生モードに切り替えますか?")
@@ -123,7 +139,6 @@ struct TransportView: View {
 
     /// 現在のプリセットに対して陳腐化しているベイクが存在するか(F-BAKE-3)
     private var isStaleBakeExists: Bool {
-        // BakeStore.list() は ENG-5 未実装のうちは空を返す。
         bakeStore.list().contains { bakeStore.isStale($0, currentPreset: viewModel.preset) }
     }
 
@@ -144,10 +159,14 @@ struct TransportView: View {
                                                  outputSize: size)
                 try? bakeStore.add(record)
                 await MainActor.run {
+                    lastBakeRecord = record
                     isExporting = false
                     showCompletionAlert = true
                 }
             } catch is CancellationError {
+                await MainActor.run { isExporting = false }
+            } catch BakeError.cancelled {
+                // ユーザー起因のキャンセルはエラー表示しない
                 await MainActor.run { isExporting = false }
             } catch {
                 await MainActor.run {
@@ -162,5 +181,13 @@ struct TransportView: View {
         exporter?.cancel()
         exportTask?.cancel()
         isExporting = false
+    }
+
+    /// 0-1のシーク位置を実尺(秒)へ換算してシークする。尺が取れない間は何もしない。
+    private func seek(toFraction fraction: Double) {
+        guard let source = viewModel.activeVideoSource,
+              let duration = source.player?.currentItem?.duration.seconds,
+              duration.isFinite, duration > 0 else { return }
+        source.seek(to: fraction * duration)
     }
 }

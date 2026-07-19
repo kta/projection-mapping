@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 /// インスペクタ(F-UI-3/4/5、F-WARP-5/6)。選択中の面・頂点に対する精密操作。
 ///

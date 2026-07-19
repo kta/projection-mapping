@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 import UniformTypeIdentifiers
 
 /// プリセット管理画面(F-PRESET-1/3)。
