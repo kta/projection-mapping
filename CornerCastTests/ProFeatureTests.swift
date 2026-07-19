@@ -122,8 +122,9 @@ final class ProFrameComposerTests: XCTestCase {
     /// メッシュ付き(4x4)compose: extentがキャンバスに一致・クラッシュしない
     func testComposeWithMeshMatchesCanvas() {
         var preset = MappingPreset.makeDefault()
-        preset.surfaces[.frontWall]?.mesh =
-            WarpMesh.fromQuad(preset.surfaces[.frontWall]!.quad, rows: 4, cols: 4)
+        // 排他アクセス違反を避けるためquadをローカルへ退避してから代入する
+        let frontQuad = preset.surfaces[.frontWall]!.quad
+        preset.surfaces[.frontWall]?.mesh = WarpMesh.fromQuad(frontQuad, rows: 4, cols: 4)
         let params = RenderParameters(canvasSize: canvas, preset: preset)
 
         let result = composer.compose(frame: makeFrame(), params: params)
@@ -156,8 +157,8 @@ final class ProFrameComposerTests: XCTestCase {
     /// メッシュ+マスク+エフェクトを全部載せてもクラッシュせず extent が保たれる
     func testComposeWithAllProFeaturesMatchesCanvas() {
         var preset = MappingPreset.makeDefault()
-        preset.surfaces[.leftWall]?.mesh =
-            WarpMesh.fromQuad(preset.surfaces[.leftWall]!.quad, rows: 4, cols: 4)
+        let leftQuad = preset.surfaces[.leftWall]!.quad
+        preset.surfaces[.leftWall]?.mesh = WarpMesh.fromQuad(leftQuad, rows: 4, cols: 4)
         preset.maskShapes = [
             MaskShape(quad: Quad(rect: CGRect(x: 0.3, y: 0.3, width: 0.2, height: 0.2)))
         ]
@@ -375,8 +376,8 @@ final class ProBackwardCompatTests: XCTestCase {
         modern.maskShapes = [MaskShape(quad: Quad(rect: CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)))]
         modern.effectSettings = EffectSettings(saturation: 1.5, contrast: 1.2,
                                                brightness: 0.1, hueDegrees: 45)
-        modern.surfaces[.frontWall]?.mesh =
-            WarpMesh.fromQuad(modern.surfaces[.frontWall]!.quad, rows: 4, cols: 4)
+        let modernQuad = modern.surfaces[.frontWall]!.quad
+        modern.surfaces[.frontWall]?.mesh = WarpMesh.fromQuad(modernQuad, rows: 4, cols: 4)
 
         let data = try JSONEncoder().encode(modern)
         var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
