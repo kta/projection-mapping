@@ -17,6 +17,9 @@ struct EditorView: View {
     @State private var showPresetList = false
     @State private var showCropEditor = false
     @State private var showHelp = false
+    @State private var showWelcome = false        // ツールバー「新規」
+    @State private var showEffects = false         // エフェクト(F-FX-1)
+    @State private var showControlSettings = false // 外部制御(F-CTRL-1/2)
 
     var body: some View {
         NavigationStack {
@@ -34,47 +37,9 @@ struct EditorView: View {
             .navigationTitle("CornerCast")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // コンテンツ選択 / テストパターン
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    Button {
-                        showContentPicker = true
-                    } label: {
-                        Label("コンテンツ", systemImage: "photo.on.rectangle")
-                    }
-                    Button {
-                        viewModel.contentSource = .testPattern
-                    } label: {
-                        Label("テストパターン", systemImage: "grid")
-                    }
-                    Button {
-                        showCropEditor = true
-                    } label: {
-                        Label("クロップ", systemImage: "crop")
-                    }
-                }
-                // モード切替(RT / ベイク)
-                ToolbarItem(placement: .principal) {
-                    Picker("出力モード", selection: $viewModel.outputMode) {
-                        Text("リアルタイム").tag(MappingViewModel.OutputMode.realtime)
-                        Text("ベイク再生").tag(MappingViewModel.OutputMode.bakedPlayback)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 240)
-                }
-                // プリセット / 出力状態
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button {
-                        showPresetList = true
-                    } label: {
-                        Label("プリセット", systemImage: "slider.horizontal.3")
-                    }
-                    Button {
-                        showHelp = true
-                    } label: {
-                        Label("ヘルプ", systemImage: "questionmark.circle")
-                    }
-                    outputStatusIndicator
-                }
+                leadingToolbar
+                modeToolbar
+                trailingToolbar
             }
             .sheet(isPresented: $showContentPicker) {
                 ContentPickerView(viewModel: viewModel)
@@ -88,6 +53,91 @@ struct EditorView: View {
             .sheet(isPresented: $showHelp) {
                 HelpView()
             }
+            .sheet(isPresented: $showWelcome) {
+                WelcomeView(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showEffects) {
+                EffectsView(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showControlSettings) {
+                ControlSettingsView()
+            }
+            // 初回起動時のユースケース選択(F-TPL-1)
+            .fullScreenCover(isPresented: $viewModel.needsWelcome) {
+                WelcomeView(viewModel: viewModel)
+            }
+        }
+    }
+
+    // MARK: ツールバー
+
+    /// 左グループ: 新規 / コンテンツ / テストパターン / クロップ
+    private var leadingToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            Button {
+                showWelcome = true
+            } label: {
+                Label("新規", systemImage: "doc.badge.plus")
+            }
+            Button {
+                showContentPicker = true
+            } label: {
+                Label("コンテンツ", systemImage: "photo.on.rectangle")
+            }
+            Button {
+                viewModel.contentSource = .testPattern
+            } label: {
+                Label("テストパターン", systemImage: "grid")
+            }
+            Button {
+                showCropEditor = true
+            } label: {
+                Label("クロップ", systemImage: "crop")
+            }
+        }
+    }
+
+    /// モード切替(RT / ベイク)
+    private var modeToolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            Picker("出力モード", selection: $viewModel.outputMode) {
+                Text("リアルタイム").tag(MappingViewModel.OutputMode.realtime)
+                Text("ベイク再生").tag(MappingViewModel.OutputMode.bakedPlayback)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 240)
+        }
+    }
+
+    /// 右グループ: エフェクト / プリセット / 出力状態 +
+    /// あまり使わない項目(外部制御 / ヘルプ)は「…」メニューに畳んで混雑を避ける。
+    private var trailingToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button {
+                showEffects = true
+            } label: {
+                Label("エフェクト", systemImage: "wand.and.stars")
+            }
+            Button {
+                showPresetList = true
+            } label: {
+                Label("プリセット", systemImage: "slider.horizontal.3")
+            }
+            Menu {
+                Button {
+                    showControlSettings = true
+                } label: {
+                    Label("外部制御", systemImage: "antenna.radiowaves.left.and.right")
+                }
+                Button {
+                    showHelp = true
+                } label: {
+                    Label("ヘルプ", systemImage: "questionmark.circle")
+                }
+            } label: {
+                Label("その他", systemImage: "ellipsis.circle")
+            }
+            outputStatusIndicator
         }
     }
 
