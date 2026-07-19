@@ -6,7 +6,8 @@ import UIKit
 /// リアルタイムモードのレンダラ(F-RT-1): CADisplayLink駆動で
 /// FrameSource → FrameComposer → CAMetalLayer に毎フレーム描画する。
 /// 設計書§3.3・§5、調査レポート§2の確定事項に沿う。
-final class OutputRenderer {
+/// NSObject継承はCADisplayLinkのselectorターゲット(@objcメソッド)に必要。
+final class OutputRenderer: NSObject {
     private let composer: FrameComposer
     private var displayLink: CADisplayLink?
 
@@ -42,6 +43,7 @@ final class OutputRenderer {
         // CIContextはMTLCommandQueueと同一にし、GPUのwaitバブルを避ける。
         self.ciContext = CIContext(mtlCommandQueue: commandQueue,
                                    options: [.cacheIntermediates: false])
+        super.init()
     }
 
     // MARK: - ライフサイクル(start/stopは冪等)

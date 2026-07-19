@@ -25,3 +25,17 @@ targets:
     sources: [CornerCastTests]
     dependencies:
       - target: CornerCast
+
+# CI(xcodebuild -scheme CornerCast test)が使う明示的スキーム
+schemes:
+  CornerCast:
+    build:
+      targets:
+        CornerCast: all
+        CornerCastTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - CornerCastTests
