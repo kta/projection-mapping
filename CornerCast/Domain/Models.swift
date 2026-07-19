@@ -11,7 +11,10 @@ import Foundation
 // 変換は必ず CoordinateMapper を経由する。各所で手計算しないこと。
 
 /// 投影対象の3面。rawValueはプリセットJSONのキーとして安定させる(変更禁止)。
-enum Surface: String, Codable, CaseIterable, Identifiable, Sendable {
+/// CodingKeyRepresentable準拠(SE-0320)は必須: これが無いと [Surface: SurfaceConfig] が
+/// JSONで「配列」としてエンコードされ、§8スキーマ(surfacesはオブジェクト)が壊れる。
+/// 自動適用ではない(後方互換のため明示準拠が必要)ことをCIのスキーマテストが実証済み。
+enum Surface: String, Codable, CaseIterable, Identifiable, Sendable, CodingKeyRepresentable {
     case leftWall
     case frontWall
     case floor
