@@ -15,10 +15,19 @@ struct FrameComposer: Sendable {
         let canvasRect = CGRect(origin: .zero, size: params.canvasSize)
         var canvas = CIImage(color: .black).cropped(to: canvasRect)
 
-        for s in params.surfaces {   // Surface.drawOrder順(床→左壁→正面壁)
-            let piece = warpedPiece(frame: frame, surface: s, canvasSize: params.canvasSize)
+        // 0) 出力エフェクト(F-FX-1): 分割前にソース全体へ適用(全面で色調が揃う)
+        let source = params.effects.isNeutral ? frame : applyEffects(frame, params.effects)
+
+        for s in params.surfaces {   // コーナー3面(drawOrder順)→自由面
+            let piece = warpedPiece(frame: source, surface: s, canvasSize: params.canvasSize)
             canvas = piece.composited(over: canvas)
         }
+
+        // 4) 出力マスク(F-MASK-1): 最後に黒四角形を重ねて遮光する
+        for quad in params.maskQuads {
+            canvas = blackQuad(quad, canvasSize: params.canvasSize).composited(over: canvas)
+        }
+
         // 合成結果がキャンバス外へはみ出さないよう最終クロップ
         return canvas.cropped(to: canvasRect)
     }
@@ -55,15 +64,90 @@ struct FrameComposer: Sendable {
             image = feathered(image, amount: s.feather)
         }
 
-        // 3) 射影変換: 入力extentの4隅を、キャンバス上の指定4点(CIピクセル座標)へ写す。
-        //    CIPerspectiveTransformは数学的に正しいホモグラフィ補間を行う(三角形分割の折れが出ない)。
+        // 3) 射影変換。メッシュワープ(F-MESH-1)有効時はセル分割してセル単位のホモグラフィ、
+        //    無効時は従来の4点ホモグラフィ1発。
+        if let mesh = s.mesh, mesh.rows >= 2, mesh.cols >= 2,
+           mesh.points.count == mesh.rows * mesh.cols {
+            return meshWarped(image, mesh: mesh, canvasSize: canvasSize)
+        }
+        return singleWarp(image, quad: s.quad, canvasSize: canvasSize)
+    }
+
+    /// 4点ホモモグラフィ1発の従来ワープ。
+    /// CIPerspectiveTransformは数学的に正しいホモグラフィ補間を行う(三角形分割の折れが出ない)。
+    private func singleWarp(_ image: CIImage, quad: Quad, canvasSize: CGSize) -> CIImage {
         let warp = CIFilter.perspectiveTransform()
         warp.inputImage = image
-        warp.topLeft = CoordinateMapper.ciPixel(fromNormalized: s.quad.topLeft, canvasSize: canvasSize)
-        warp.topRight = CoordinateMapper.ciPixel(fromNormalized: s.quad.topRight, canvasSize: canvasSize)
-        warp.bottomRight = CoordinateMapper.ciPixel(fromNormalized: s.quad.bottomRight, canvasSize: canvasSize)
-        warp.bottomLeft = CoordinateMapper.ciPixel(fromNormalized: s.quad.bottomLeft, canvasSize: canvasSize)
+        warp.topLeft = CoordinateMapper.ciPixel(fromNormalized: quad.topLeft, canvasSize: canvasSize)
+        warp.topRight = CoordinateMapper.ciPixel(fromNormalized: quad.topRight, canvasSize: canvasSize)
+        warp.bottomRight = CoordinateMapper.ciPixel(fromNormalized: quad.bottomRight, canvasSize: canvasSize)
+        warp.bottomLeft = CoordinateMapper.ciPixel(fromNormalized: quad.bottomLeft, canvasSize: canvasSize)
         return warp.outputImage ?? image
+    }
+
+    /// メッシュワープ(F-MESH-1): ソース片を(rows-1)×(cols-1)セルへ軸平行分割し、
+    /// 各セルを対応する制御点quadへホモグラフィ変換して合成する。
+    /// 隣接セルは制御点(エッジ)を共有するため、境界は連続する(区分的射影変換)。
+    /// フェザーは分割前に適用済みなので、セル境界に切れ目は出ない。
+    private func meshWarped(_ image: CIImage, mesh: WarpMesh, canvasSize: CGSize) -> CIImage {
+        let extent = image.extent
+        var acc = CIImage.empty()
+        for r in 0..<(mesh.rows - 1) {
+            for c in 0..<(mesh.cols - 1) {
+                let u0 = CGFloat(c) / CGFloat(mesh.cols - 1)
+                let u1 = CGFloat(c + 1) / CGFloat(mesh.cols - 1)
+                let v0 = CGFloat(r) / CGFloat(mesh.rows - 1)
+                let v1 = CGFloat(r + 1) / CGFloat(mesh.rows - 1)
+                // 正規化セル(左上原点) → ソース片extent内のCI矩形 → 原点へ平行移動
+                let srcRect = CoordinateMapper.ciRect(
+                    fromNormalized: CGRect(x: u0, y: v0, width: u1 - u0, height: v1 - v0),
+                    in: extent)
+                let cell = image.cropped(to: srcRect)
+                    .transformed(by: CGAffineTransform(translationX: -srcRect.minX,
+                                                       y: -srcRect.minY))
+                let warp = CIFilter.perspectiveTransform()
+                warp.inputImage = cell
+                warp.topLeft = CoordinateMapper.ciPixel(
+                    fromNormalized: mesh.point(row: r, col: c), canvasSize: canvasSize)
+                warp.topRight = CoordinateMapper.ciPixel(
+                    fromNormalized: mesh.point(row: r, col: c + 1), canvasSize: canvasSize)
+                warp.bottomRight = CoordinateMapper.ciPixel(
+                    fromNormalized: mesh.point(row: r + 1, col: c + 1), canvasSize: canvasSize)
+                warp.bottomLeft = CoordinateMapper.ciPixel(
+                    fromNormalized: mesh.point(row: r + 1, col: c), canvasSize: canvasSize)
+                if let out = warp.outputImage {
+                    acc = out.composited(over: acc)
+                }
+            }
+        }
+        return acc
+    }
+
+    /// 出力マスク(F-MASK-1): 黒い矩形を指定quadへワープしたもの
+    private func blackQuad(_ quad: Quad, canvasSize: CGSize) -> CIImage {
+        let base = CIImage(color: .black)
+            .cropped(to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        return singleWarp(base, quad: quad, canvasSize: canvasSize)
+    }
+
+    /// 出力エフェクト(F-FX-1): 彩度/コントラスト/明度(CIColorControls)+色相(CIHueAdjust)
+    private func applyEffects(_ image: CIImage, _ fx: EffectSettings) -> CIImage {
+        var out = image
+        if fx.saturation != 1.0 || fx.contrast != 1.0 || fx.brightness != 0.0 {
+            let f = CIFilter.colorControls()
+            f.inputImage = out
+            f.saturation = Float(fx.saturation)
+            f.contrast = Float(fx.contrast)
+            f.brightness = Float(fx.brightness)
+            out = f.outputImage ?? out
+        }
+        if fx.hueDegrees != 0.0 {
+            let f = CIFilter.hueAdjust()
+            f.inputImage = out
+            f.angle = Float(fx.hueDegrees * .pi / 180)
+            out = f.outputImage ?? out
+        }
+        return out
     }
 
     /// エッジフェザリング: 内側にinsetした白矩形をぼかしたものをアルファマスクとして適用する。

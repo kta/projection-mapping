@@ -11,6 +11,8 @@ final class AppServices {
     let viewModel: MappingViewModel
     let composer = FrameComposer()
     let externalDisplayManager: ExternalDisplayManager
+    /// 外部制御(OSC/MIDI)。設定に応じてControlSettingsViewから起動される。
+    let controlHub: ControlHub
 
     private init() {
         let store = PresetStore()
@@ -18,5 +20,6 @@ final class AppServices {
         let vm = MappingViewModel(presetStore: store)
         self.viewModel = vm
         self.externalDisplayManager = ExternalDisplayManager(viewModel: vm, composer: FrameComposer())
+        self.controlHub = ControlHub(viewModel: vm)
     }
 }

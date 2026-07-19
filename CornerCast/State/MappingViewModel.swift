@@ -42,7 +42,11 @@ final class MappingViewModel {
     var selectedCorner: Quad.Corner?
     /// 選択中の自由面(F-FREE-1)。コーナー3面の選択とは排他(UI側で切替時に相手をnilにする)。
     var selectedExtraID: UUID?
+    /// 選択中のマスク(F-MASK-1)。面選択とは排他。
+    var selectedMaskID: UUID?
     var isEditLocked = false             // F-UI-6
+    /// 初回起動(保存済み状態なし)ならユースケース選択(F-TPL-1)を表示する
+    var needsWelcome = false
 
     // MARK: 依存
 
@@ -58,7 +62,28 @@ final class MappingViewModel {
 
     init(presetStore: PresetStoreProtocol) {
         self.presetStore = presetStore
-        self.preset = presetStore.loadLastUsed() ?? .makeDefault()
+        if let last = presetStore.loadLastUsed() {
+            self.preset = last
+        } else {
+            self.preset = .makeDefault()
+            self.needsWelcome = true     // 初回はユースケース選択から(F-TPL-1)
+        }
+    }
+
+    // MARK: テンプレート(F-TPL-1)
+
+    /// ユースケーステンプレートを適用する(現在の状態はアンドゥで戻せる)
+    func apply(template: MappingPreset.ProjectTemplate) {
+        pushUndo()
+        preset = MappingPreset.make(template: template)
+        selectedSurface = template == .freeform ? nil : .frontWall
+        selectedCorner = nil
+        selectedExtraID = template == .freeform ? preset.extras.first?.id : nil
+        selectedMaskID = nil
+        if template == .sample {
+            contentSource = .testPattern
+        }
+        preset.updatedAt = .now
     }
 
     // MARK: レンダラ向けスナップショット
@@ -193,6 +218,91 @@ final class MappingViewModel {
         var extras = preset.extras
         mutate(&extras[i])
         preset.extras = extras
+        preset.updatedAt = .now
+    }
+
+    // MARK: メッシュワープ(F-MESH-1)
+
+    /// メッシュワープの有効/無効。有効化時は現在のquadから4×4で初期化する。
+    func setMeshEnabled(_ enabled: Bool, for surface: Surface, rows: Int = 4, cols: Int = 4) {
+        guard !isEditLocked, let config = preset.surfaces[surface] else { return }
+        pushUndo()
+        preset.surfaces[surface]?.mesh =
+            enabled ? WarpMesh.fromQuad(config.quad, rows: rows, cols: cols) : nil
+        preset.updatedAt = .now
+    }
+
+    /// メッシュ制御点の移動(0-1クランプ)。アンドゥはUI側のbeginGestureで積む。
+    func moveMeshPoint(surface: Surface, index: Int, to p: CGPoint) {
+        guard !isEditLocked, var mesh = preset.surfaces[surface]?.mesh,
+              mesh.points.indices.contains(index) else { return }
+        mesh.points[index] = Quad.clamped(p)
+        preset.surfaces[surface]?.mesh = mesh
+        preset.updatedAt = .now
+    }
+
+    /// 自由面版メッシュ有効/無効
+    func setExtraMeshEnabled(_ enabled: Bool, id: UUID, rows: Int = 4, cols: Int = 4) {
+        guard !isEditLocked else { return }
+        pushUndo()
+        updateExtra(id: id) { e in
+            e.config.mesh = enabled ? WarpMesh.fromQuad(e.config.quad, rows: rows, cols: cols) : nil
+        }
+    }
+
+    /// 自由面版メッシュ制御点の移動
+    func moveExtraMeshPoint(id: UUID, index: Int, to p: CGPoint) {
+        guard !isEditLocked else { return }
+        updateExtra(id: id) { e in
+            guard var mesh = e.config.mesh, mesh.points.indices.contains(index) else { return }
+            mesh.points[index] = Quad.clamped(p)
+            e.config.mesh = mesh
+        }
+    }
+
+    // MARK: 出力マスク(F-MASK-1)
+
+    func addMask() {
+        guard !isEditLocked else { return }
+        pushUndo()
+        var masks = preset.maskShapes
+        masks.append(MaskShape(name: "マスク\(masks.count + 1)",
+                               quad: Quad(rect: CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2))))
+        preset.maskShapes = masks
+        selectedMaskID = masks.last?.id
+        selectedSurface = nil
+        selectedCorner = nil
+        selectedExtraID = nil
+        preset.updatedAt = .now
+    }
+
+    func removeMask(id: UUID) {
+        guard !isEditLocked else { return }
+        pushUndo()
+        preset.maskShapes.removeAll { $0.id == id }
+        if selectedMaskID == id { selectedMaskID = nil }
+        preset.updatedAt = .now
+    }
+
+    func moveMaskCorner(id: UUID, corner: Quad.Corner, to p: CGPoint) {
+        guard !isEditLocked else { return }
+        guard let i = preset.maskShapes.firstIndex(where: { $0.id == id }) else { return }
+        var masks = preset.maskShapes
+        masks[i].quad[corner] = Quad.clamped(p)
+        preset.maskShapes = masks
+        preset.updatedAt = .now
+    }
+
+    func translateMask(id: UUID, by delta: CGPoint, from base: Quad) {
+        guard !isEditLocked else { return }
+        guard let i = preset.maskShapes.firstIndex(where: { $0.id == id }) else { return }
+        let clamped = Self.clampedDelta(delta, for: base)
+        var masks = preset.maskShapes
+        for c in Quad.Corner.allCases {
+            let p = base[c]
+            masks[i].quad[c] = CGPoint(x: p.x + clamped.x, y: p.y + clamped.y)
+        }
+        preset.maskShapes = masks
         preset.updatedAt = .now
     }
 
