@@ -2,13 +2,7 @@ import UIKit
 import SwiftUI
 
 /// メイン(iPad本体)シーン。SwiftUIのEditorViewをホストするだけ。
-///
-/// TODO(TASK EXT-1 / 担当: scenes agent):
-/// - scene(_:willConnectTo:options:) で UIWindow を生成し、
-///   UIHostingController(rootView: EditorView(viewModel: AppServices.shared.viewModel))
-///   をrootにして makeKeyAndVisible。
-/// - 投影中の画面消灯防止(N-THERM-2): sceneDidBecomeActiveで
-///   UIApplication.shared.isIdleTimerDisabled = true、resignActiveでfalse。
+/// 状態共有はAppServices.shared経由(環境注入は外部シーンでクラッシュ事例があるため不使用)。
 final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
