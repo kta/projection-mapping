@@ -1,0 +1,27 @@
+# XcodeGen definition — run `xcodegen generate` on macOS to produce CornerCast.xcodeproj
+# (brew install xcodegen)
+name: CornerCast
+options:
+  bundleIdPrefix: dev.cornercast
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "2"          # iPad only
+targets:
+  CornerCast:
+    type: application
+    platform: iOS
+    sources: [CornerCast]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: false
+        INFOPLIST_FILE: CornerCast/Info.plist
+  CornerCastTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [CornerCastTests]
+    dependencies:
+      - target: CornerCast
