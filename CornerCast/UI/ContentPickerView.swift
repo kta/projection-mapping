@@ -20,6 +20,10 @@ struct ContentPickerView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
 
+    // ベイク済み動画の選択(F-BAKE-2/3)
+    @State private var bakes: [BakeRecord] = []
+    private let bakeStore = BakeStore()
+
     var body: some View {
         NavigationStack {
             List {
@@ -46,9 +50,11 @@ struct ContentPickerView: View {
                         Label("ファイルから読み込み", systemImage: "folder")
                     }
                 }
+                bakedSection
             }
             .navigationTitle("コンテンツ選択")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { bakes = bakeStore.list() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("閉じる") { dismiss() }
@@ -78,6 +84,53 @@ struct ContentPickerView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(errorMessage ?? "")
+            }
+        }
+    }
+
+    // MARK: - ベイク済み動画(F-BAKE-2/3)
+
+    @ViewBuilder private var bakedSection: some View {
+        Section("ベイク済み動画(低負荷再生)") {
+            if bakes.isEmpty {
+                Text("ベイク済み動画はありません。動画を選択後、下部の「この設定で書き出し」から作成できます。")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+            ForEach(bakes) { record in
+                bakeRow(record)
+            }
+        }
+    }
+
+    private func bakeRow(_ record: BakeRecord) -> some View {
+        Button {
+            // 結線契約(docs/05 §3-7): ベイク再生はUI側がcontentSourceとoutputModeを設定する
+            viewModel.contentSource = .bakedVideo(record.fileURL)
+            viewModel.outputMode = .bakedPlayback
+            dismiss()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.sourceFileName)
+                    .foregroundStyle(.primary)
+                HStack(spacing: 8) {
+                    Text("\(record.outputWidth)×\(record.outputHeight)")
+                    Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    if bakeStore.isStale(record, currentPreset: viewModel.preset) {
+                        Label("再書き出し推奨", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                try? bakeStore.delete(id: record.id)
+                bakes = bakeStore.list()
+            } label: {
+                Label("削除", systemImage: "trash")
             }
         }
     }

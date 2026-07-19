@@ -15,13 +15,22 @@ struct MeshCanvasView: View {
 
     /// ドラッグ判定に使う座標空間名。
     private static let space = "CornerCast.canvas"
+    /// 合成プレビュー(F-OUT-4)。EditorPreviewRendererがデバウンス付きで更新する。
+    @State private var previewImage: UIImage?
 
     var body: some View {
         GeometryReader { geo in
             let canvasRect = Self.letterboxRect(in: geo.size)
             ZStack {
-                // 背景(F-OUT-4のプレビュー相当。初版はワイヤーフレームのみ)
                 Color.black
+                // 合成プレビュー(F-OUT-4): 出力と同じFrameComposerを低解像度で回した結果。
+                // 外部ディスプレイ未接続でも、投影される絵をここで確認できる。
+                if let previewImage {
+                    Image(uiImage: previewImage)
+                        .resizable()
+                        .frame(width: canvasRect.width, height: canvasRect.height)
+                        .position(x: canvasRect.midX, y: canvasRect.midY)
+                }
                 Rectangle()
                     .stroke(Color.white.opacity(0.25), lineWidth: 1)
                     .frame(width: canvasRect.width, height: canvasRect.height)
@@ -59,8 +68,33 @@ struct MeshCanvasView: View {
                 }
             }
             .coordinateSpace(name: Self.space)
+            .task(id: previewKey) {
+                // 連続ドラッグ中の再描画を間引く(120msデバウンス)。
+                // .task(id:) はキー変化時に前回タスクを自動キャンセルする。
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled else { return }
+                previewImage = EditorPreviewRenderer.shared.render(
+                    preset: viewModel.preset,
+                    content: viewModel.contentSource,
+                    size: CGSize(width: 640, height: 360))
+            }
         }
         .background(Color.black)
+    }
+
+    /// プレビュー再描画のトリガキー(ワープ結果に影響する状態のみ)
+    private var previewKey: String {
+        viewModel.preset.calibrationFingerprint + "|" + Self.contentKey(viewModel.contentSource)
+    }
+
+    private static func contentKey(_ c: MappingViewModel.ContentSource) -> String {
+        switch c {
+        case .none: return "none"
+        case .testPattern: return "testPattern"
+        case .image(let url): return "image:\(url.absoluteString)"
+        case .video(let url): return "video:\(url.absoluteString)"
+        case .bakedVideo(let url): return "baked:\(url.absoluteString)"
+        }
     }
 
     // MARK: - 描画ヘルパー

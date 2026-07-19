@@ -1,5 +1,7 @@
 import SwiftUI
 import Foundation
+import AVFoundation
+import Combine
 
 /// トランスポートバー(F-SRC-4)+ベイク操作(F-BAKE系)。
 ///
@@ -14,6 +16,8 @@ struct TransportView: View {
     // 再生状態の表示はUIローカルで保持する(ソース側に状態購読APIを持たせない割り切り)。
     @State private var isPlaying = false
     @State private var seekPosition: Double = 0
+    /// シーク操作中はタイマー由来の位置更新でスライダを上書きしない
+    @State private var isSeeking = false
 
     // ベイク
     @State private var bakeStore = BakeStore()
@@ -43,6 +47,7 @@ struct TransportView: View {
 
             // シーク(ドラッグ確定時に実尺換算でシークする)
             Slider(value: $seekPosition, in: 0...1) { editing in
+                isSeeking = editing
                 if !editing { seek(toFraction: seekPosition) }
             }
 
@@ -68,6 +73,10 @@ struct TransportView: View {
         // 音量変更を再生中ソースへ即時反映(presetへの永続化はBinding側で行われる)
         .onChange(of: viewModel.preset.volume) { _, v in
             viewModel.activeVideoSource?.volume = Float(v)
+        }
+        // 再生位置・再生状態の定期反映(0.5秒間隔で十分)
+        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+            syncPlaybackUI()
         }
         .overlay { if isExporting { exportOverlay } }
         .confirmationDialog("書き出し解像度", isPresented: $showBakeDialog, titleVisibility: .visible) {
@@ -189,5 +198,15 @@ struct TransportView: View {
               let duration = source.player?.currentItem?.duration.seconds,
               duration.isFinite, duration > 0 else { return }
         source.seek(to: fraction * duration)
+    }
+
+    /// 再生状態・再生位置をUIへ反映する(シーク操作中はスライダを触らない)
+    private func syncPlaybackUI() {
+        guard let player = viewModel.activeVideoSource?.player else { return }
+        isPlaying = player.timeControlStatus == .playing
+        guard !isSeeking,
+              let duration = player.currentItem?.duration.seconds,
+              duration.isFinite, duration > 0 else { return }
+        seekPosition = min(max(player.currentTime().seconds / duration, 0), 1)
     }
 }
