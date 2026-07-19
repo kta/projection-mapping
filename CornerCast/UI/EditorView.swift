@@ -67,6 +67,8 @@ struct EditorView: View {
                 WelcomeView(viewModel: viewModel)
             }
         }
+        // ブランドアクセント: 面の識別色(シアン)と揃え、Toggle/Slider/ボタンに一貫適用
+        .tint(.cyan)
     }
 
     // MARK: ツールバー

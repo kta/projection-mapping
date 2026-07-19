@@ -13,6 +13,9 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         let window = UIWindow(windowScene: windowScene)
+        // デザイン方針: 投影アプリは暗い部屋で使うため常時ダーク外観で統一する
+        // (キャンバス/Welcomeの黒基調とForm/ツールバーの外観差をなくす)。
+        window.overrideUserInterfaceStyle = .dark
         // 状態源はAppServices.shared経由で共有する(環境注入は使わない — クラッシュ事例あり)。
         let root = UIHostingController(rootView: EditorView(viewModel: AppServices.shared.viewModel))
         window.rootViewController = root
