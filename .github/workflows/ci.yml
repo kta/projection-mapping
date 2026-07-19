@@ -66,3 +66,41 @@ jobs:
             TestResults.xcresult
           if-no-files-found: ignore
           retention-days: 7
+
+  build-and-test-catalyst:
+    name: Build & Test (Mac Catalyst)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          command -v xcodegen >/dev/null || brew install xcodegen
+          command -v xcbeautify >/dev/null || brew install xcbeautify
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build and test (Mac Catalyst)
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project CornerCast.xcodeproj \
+            -scheme CornerCast \
+            -destination 'platform=macOS,variant=Mac Catalyst' \
+            -resultBundlePath TestResultsCatalyst.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee xcodebuild-catalyst.log | xcbeautify
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics-catalyst
+          path: |
+            xcodebuild-catalyst.log
+            TestResultsCatalyst.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

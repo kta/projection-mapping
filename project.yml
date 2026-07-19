@@ -13,7 +13,8 @@ settings:
 targets:
   CornerCast:
     type: application
-    platform: iOS
+    # iPadOS + macOS(Mac Catalyst)。UIKit/シーンAPIを共有する単一コードベース。
+    supportedDestinations: [iOS, macCatalyst]
     sources: [CornerCast]
     settings:
       base:
@@ -21,7 +22,7 @@ targets:
         INFOPLIST_FILE: CornerCast/Info.plist
   CornerCastTests:
     type: bundle.unit-test
-    platform: iOS
+    supportedDestinations: [iOS, macCatalyst]
     sources: [CornerCastTests]
     dependencies:
       - target: CornerCast
