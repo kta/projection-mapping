@@ -19,6 +19,8 @@ struct MeshCanvasView: View {
     @State private var previewImage: UIImage?
     /// 面全体ドラッグ(F-UI-7)のジェスチャ開始時quad
     @State private var surfaceDragBase: [Surface: Quad] = [:]
+    /// 自由面(F-FREE-1)の全体ドラッグ開始時quad
+    @State private var extraDragBase: [UUID: Quad] = [:]
 
     var body: some View {
         GeometryReader { geo in
@@ -75,6 +77,22 @@ struct MeshCanvasView: View {
                         )
                     }
                 }
+
+                // 自由面(F-FREE-1): ワイヤーフレーム+全体ドラッグ+4隅ハンドル
+                ForEach(viewModel.preset.extras) { extra in
+                    extraWireframe(extra, canvasRect: canvasRect)
+                }
+                ForEach(viewModel.preset.extras) { extra in
+                    ForEach(Quad.Corner.allCases) { c in
+                        ExtraControlPoint(
+                            viewModel: viewModel,
+                            extraID: extra.id,
+                            corner: c,
+                            canvasRect: canvasRect,
+                            spaceName: Self.space
+                        )
+                    }
+                }
             }
             .coordinateSpace(name: Self.space)
             // ハードウェアキーボード微調整: 矢印=±1px、Shift+矢印=±10px
@@ -98,11 +116,48 @@ struct MeshCanvasView: View {
         .background(Color.black)
     }
 
+    /// 自由面1枚ぶんのワイヤーフレーム+全体ドラッグ
+    @ViewBuilder private func extraWireframe(_ extra: ExtraSurface, canvasRect: CGRect) -> some View {
+        let quad = extra.config.quad
+        let selected = viewModel.selectedExtraID == extra.id
+        quadPath(quad, in: canvasRect)
+            .fill(Color.white.opacity(0.001))
+            .gesture(extraBodyGesture(extra.id, canvasRect: canvasRect))
+            .allowsHitTesting(!viewModel.isEditLocked)
+        quadPath(quad, in: canvasRect)
+            .stroke(Color.green,
+                    style: StrokeStyle(lineWidth: selected ? 3 : 1.5, lineJoin: .round))
+            .opacity(viewModel.isEditLocked ? 0.5 : 1)
+        Text(extra.name)
+            .font(.caption2)
+            .foregroundStyle(Color.green)
+            .position(centroid(quad, in: canvasRect))
+    }
+
+    private func extraBodyGesture(_ id: UUID, canvasRect: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.space))
+            .onChanged { value in
+                viewModel.selectedExtraID = id
+                viewModel.selectedSurface = nil
+                viewModel.selectedCorner = nil
+                if extraDragBase[id] == nil {
+                    viewModel.beginGesture()
+                    extraDragBase[id] = viewModel.preset.extras.first { $0.id == id }?.config.quad
+                }
+                guard let base = extraDragBase[id], canvasRect.width > 0 else { return }
+                let delta = CGPoint(x: value.translation.width / canvasRect.width,
+                                    y: value.translation.height / canvasRect.height)
+                viewModel.translateExtra(id: id, by: delta, from: base)
+            }
+            .onEnded { _ in extraDragBase[id] = nil }
+    }
+
     /// 面全体の平行移動ジェスチャ(F-UI-7)
     private func surfaceDragGesture(_ s: Surface, canvasRect: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.space))
             .onChanged { value in
                 viewModel.selectedSurface = s
+                viewModel.selectedExtraID = nil
                 if surfaceDragBase[s] == nil {
                     viewModel.beginGesture()   // 1ジェスチャ=1アンドゥ単位
                     surfaceDragBase[s] = viewModel.preset.surfaces[s]?.quad
@@ -252,9 +307,10 @@ private struct ControlPoint: View {
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named(spaceName))
             .onChanged { value in
-                // タッチした時点で選択を更新(InspectorViewと連動)
+                // タッチした時点で選択を更新(InspectorViewと連動)。自由面の選択は解除。
                 viewModel.selectedSurface = surface
                 viewModel.selectedCorner = corner
+                viewModel.selectedExtraID = nil
 
                 // 微小移動はタップ(選択のみ)とみなし、ドラッグ開始扱いにしない
                 let moved = hypot(value.translation.width, value.translation.height)
@@ -270,5 +326,60 @@ private struct ControlPoint: View {
             .onEnded { _ in
                 began = false
             }
+    }
+}
+
+// MARK: - 自由面のコントロールポイント(1頂点)
+
+/// 自由面(F-FREE-1)用のコントロールポイント。緑固定・リンク解決なし。
+private struct ExtraControlPoint: View {
+    let viewModel: MappingViewModel
+    let extraID: UUID
+    let corner: Quad.Corner
+    let canvasRect: CGRect
+    let spaceName: String
+
+    @State private var began = false
+
+    private var isSelected: Bool { viewModel.selectedExtraID == extraID }
+
+    var body: some View {
+        let normalized = viewModel.preset.extras
+            .first { $0.id == extraID }?.config.quad[corner] ?? .zero
+        let pos = MeshCanvasView.uiPoint(normalized, in: canvasRect)
+
+        ZStack {
+            Circle()
+                .fill(Color.green.opacity(isSelected ? 0.95 : 0.65))
+                .frame(width: 20, height: 20)
+            Circle()
+                .stroke(Color.white, lineWidth: isSelected ? 3 : 1)
+                .frame(width: 20, height: 20)
+        }
+        .frame(width: 44, height: 44)
+        .contentShape(Circle())
+        .opacity(viewModel.isEditLocked ? 0.4 : 1)
+        .position(pos)
+        .allowsHitTesting(!viewModel.isEditLocked)
+        .gesture(dragGesture)
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(spaceName))
+            .onChanged { value in
+                viewModel.selectedExtraID = extraID
+                viewModel.selectedSurface = nil
+                viewModel.selectedCorner = nil
+
+                let moved = hypot(value.translation.width, value.translation.height)
+                guard began || moved >= 2 else { return }
+                if !began {
+                    began = true
+                    viewModel.beginGesture()
+                }
+                let norm = MeshCanvasView.normalized(value.location, in: canvasRect)
+                viewModel.moveExtra(corner: corner, id: extraID, to: norm)
+            }
+            .onEnded { _ in began = false }
     }
 }

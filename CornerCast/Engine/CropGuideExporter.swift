@@ -17,13 +17,23 @@ enum CropGuideExporter {
             UIColor.black.setFill()
             cg.fill(CGRect(origin: .zero, size: size))
 
-            for s in Surface.drawOrder {
-                guard let crop = preset.surfaces[s]?.crop else { continue }
+            // コーナー3面+自由面(F-FREE-1)を(名前, 色, crop)の共通形で描く
+            var entries: [(name: String, color: UIColor, crop: CGRect)] =
+                Surface.drawOrder.compactMap { s in
+                    guard let crop = preset.surfaces[s]?.crop else { return nil }
+                    return (s.displayName, identityColor(for: s), crop)
+                }
+            for e in preset.extras {
+                entries.append((e.name, .green, e.config.crop))
+            }
+
+            for entry in entries {
+                let crop = entry.crop
                 let rect = CGRect(x: crop.minX * size.width,
                                   y: crop.minY * size.height,
                                   width: crop.width * size.width,
                                   height: crop.height * size.height)
-                let color = identityColor(for: s)
+                let color = entry.color
 
                 color.withAlphaComponent(0.25).setFill()
                 cg.fill(rect)
@@ -34,7 +44,7 @@ enum CropGuideExporter {
                 border.stroke()
 
                 // 面名+正規化座標(制作ソフトでの位置合わせ用)
-                let label = "\(s.displayName)\n\(coordinateText(crop))" as NSString
+                let label = "\(entry.name)\n\(coordinateText(crop))" as NSString
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.alignment = .center
                 let attrs: [NSAttributedString.Key: Any] = [

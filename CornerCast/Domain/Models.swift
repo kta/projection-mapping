@@ -93,6 +93,42 @@ struct SurfaceConfig: Codable, Equatable, Sendable {
     var brightness: Double = 1.0
     /// 1.0が無補正(0.25-4.0)
     var gamma: Double = 1.0
+    /// エッジフェザリング量(F-WARP-7)。面の短辺に対する割合(0=無効〜0.3)。
+    /// 境界を柔らかくして継ぎ目・部屋の凹凸を目立ちにくくする。
+    var feather: Double = 0.0
+
+    init(crop: CGRect, quad: Quad,
+         brightness: Double = 1.0, gamma: Double = 1.0, feather: Double = 0.0) {
+        self.crop = crop
+        self.quad = quad
+        self.brightness = brightness
+        self.gamma = gamma
+        self.feather = feather
+    }
+
+    // featherはv1.3追加フィールド。既存の保存済みJSONを壊さないよう
+    // decodeIfPresentで読む(カスタムはinit(from:)のみ — encodeは合成のまま)。
+    private enum CodingKeys: String, CodingKey {
+        case crop, quad, brightness, gamma, feather
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        crop = try c.decode(CGRect.self, forKey: .crop)
+        quad = try c.decode(Quad.self, forKey: .quad)
+        brightness = try c.decodeIfPresent(Double.self, forKey: .brightness) ?? 1.0
+        gamma = try c.decodeIfPresent(Double.self, forKey: .gamma) ?? 1.0
+        feather = try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0.0
+    }
+}
+
+/// 自由に追加できる面(F-FREE-1)。コーナー3面(Surface)の外側に任意枚数置ける。
+/// 汎用マッピングアプリの「面の追加」に相当し、柱・天井・小物への投影に使う。
+/// 頂点リンク・キーボード微調整はコーナー3面専用(追加面は対象外)。
+struct ExtraSurface: Codable, Equatable, Identifiable, Sendable {
+    var id: UUID = UUID()
+    var name: String = "追加面"
+    var config: SurfaceConfig
 }
 
 /// 頂点リンク(F-WARP-5): aとbの頂点は常に同一座標に保つ
@@ -120,6 +156,15 @@ struct MappingPreset: Codable, Equatable, Identifiable, Sendable {
     var links: [CornerLink]
     var loop: Bool = true
     var volume: Double = 1.0
+    /// 自由面(F-FREE-1)。v1.3追加フィールドのためOptional(旧JSONとの互換維持)。
+    /// アクセスは `extras` を使うこと。
+    var extraSurfaces: [ExtraSurface]?
+
+    /// extraSurfacesの非Optionalアクセサ(空配列はnilに正規化して保存を汚さない)
+    var extras: [ExtraSurface] {
+        get { extraSurfaces ?? [] }
+        set { extraSurfaces = newValue.isEmpty ? nil : newValue }
+    }
 
     /// ベイク紐付け(F-BAKE-3)用: ワープ結果に影響するフィールドのみから決定的に計算する
     var calibrationFingerprint: String {
@@ -127,14 +172,26 @@ struct MappingPreset: Codable, Equatable, Identifiable, Sendable {
         for s in Surface.allCases {
             guard let c = surfaces[s] else { continue }
             parts.append(s.rawValue)
-            parts.append(String(format: "%.6f,%.6f,%.6f,%.6f", c.crop.origin.x, c.crop.origin.y, c.crop.width, c.crop.height))
-            for corner in Quad.Corner.allCases {
-                let p = c.quad[corner]
-                parts.append(String(format: "%.6f,%.6f", p.x, p.y))
-            }
-            parts.append(String(format: "%.4f,%.4f", c.brightness, c.gamma))
+            parts.append(Self.configFingerprint(c))
+        }
+        for e in extras {
+            parts.append("extra:\(e.id.uuidString)")
+            parts.append(Self.configFingerprint(e.config))
         }
         return parts.joined(separator: "|")
+    }
+
+    private static func configFingerprint(_ c: SurfaceConfig) -> String {
+        var parts: [String] = [
+            String(format: "%.6f,%.6f,%.6f,%.6f",
+                   c.crop.origin.x, c.crop.origin.y, c.crop.width, c.crop.height)
+        ]
+        for corner in Quad.Corner.allCases {
+            let p = c.quad[corner]
+            parts.append(String(format: "%.6f,%.6f", p.x, p.y))
+        }
+        parts.append(String(format: "%.4f,%.4f,%.4f", c.brightness, c.gamma, c.feather))
+        return parts.joined(separator: ",")
     }
 
     /// 既定プリセット: 左1/3・中央1/3を上段、下段中央を床に割り当て(F-CROP-1)
@@ -172,23 +229,37 @@ struct MappingPreset: Codable, Equatable, Identifiable, Sendable {
 /// 1フレーム描画に必要な全パラメータ。参照型を含めないこと(スレッド境界を安全に越えるため)。
 struct RenderParameters: Equatable, Sendable {
     struct SurfaceRender: Equatable, Sendable {
-        var surface: Surface
+        /// コーナー3面ならその種別。自由面(F-FREE-1)はnil。
+        var surface: Surface?
+        /// 表示名(テストパターンのラベル等に使用)
+        var name: String
         var crop: CGRect      // 正規化・左上原点
         var quad: Quad        // 正規化・左上原点
         var brightness: Double
         var gamma: Double
+        var feather: Double
     }
     /// 出力キャンバスのピクセルサイズ(外部ディスプレイのcurrentMode、未接続時はプレビューサイズ)
     var canvasSize: CGSize
-    /// Surface.drawOrder順に整列済み
+    /// コーナー3面(Surface.drawOrder順)→ 自由面(配列順)の描画順で整列済み
     var surfaces: [SurfaceRender]
 
     init(canvasSize: CGSize, preset: MappingPreset) {
         self.canvasSize = canvasSize
-        self.surfaces = Surface.drawOrder.compactMap { s in
+        var list: [SurfaceRender] = Surface.drawOrder.compactMap { s in
             guard let c = preset.surfaces[s] else { return nil }
-            return SurfaceRender(surface: s, crop: c.crop, quad: c.quad,
-                                 brightness: c.brightness, gamma: c.gamma)
+            return SurfaceRender(surface: s, name: s.displayName,
+                                 crop: c.crop, quad: c.quad,
+                                 brightness: c.brightness, gamma: c.gamma,
+                                 feather: c.feather)
         }
+        for e in preset.extras {
+            list.append(SurfaceRender(surface: nil, name: e.name,
+                                      crop: e.config.crop, quad: e.config.quad,
+                                      brightness: e.config.brightness,
+                                      gamma: e.config.gamma,
+                                      feather: e.config.feather))
+        }
+        self.surfaces = list
     }
 }

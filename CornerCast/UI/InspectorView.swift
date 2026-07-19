@@ -17,6 +17,7 @@ struct InspectorView: View {
             selectionSection
             nudgeSection
             colorSection
+            extrasSection
             linkSection
             resetSection
         }
@@ -92,6 +93,58 @@ struct InspectorView: View {
                         if editing { viewModel.beginGesture() }
                     }
                 }
+                VStack(alignment: .leading) {
+                    Text("エッジぼかし \(featherBinding(s).wrappedValue, format: .number.precision(.fractionLength(2)))")
+                        .font(.caption)
+                    Slider(value: featherBinding(s), in: 0...0.3) { editing in
+                        if editing { viewModel.beginGesture() }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: 自由面(F-FREE-1)
+
+    @ViewBuilder private var extrasSection: some View {
+        Section("追加面") {
+            Button {
+                viewModel.addExtraSurface()
+            } label: {
+                Label("面を追加", systemImage: "plus.rectangle.on.rectangle")
+            }
+            .disabled(viewModel.isEditLocked)
+
+            if let id = viewModel.selectedExtraID,
+               let extra = viewModel.preset.extras.first(where: { $0.id == id }) {
+                TextField("名前", text: extraNameBinding(id))
+                    .textFieldStyle(.roundedBorder)
+                extraSlider("明るさ", id: id, keyPath: \.brightness, range: 0.25...2.0,
+                            current: extra.config.brightness)
+                extraSlider("ガンマ", id: id, keyPath: \.gamma, range: 0.25...4.0,
+                            current: extra.config.gamma)
+                extraSlider("エッジぼかし", id: id, keyPath: \.feather, range: 0...0.3,
+                            current: extra.config.feather)
+                Button(role: .destructive) {
+                    viewModel.removeExtraSurface(id: id)
+                } label: {
+                    Label("この面を削除", systemImage: "trash")
+                }
+            } else if !viewModel.preset.extras.isEmpty {
+                Text("キャンバス上の追加面(緑)をタップすると編集できます")
+                    .foregroundStyle(.secondary).font(.caption)
+            }
+        }
+    }
+
+    private func extraSlider(_ title: String, id: UUID,
+                             keyPath: WritableKeyPath<SurfaceConfig, Double>,
+                             range: ClosedRange<Double>, current: Double) -> some View {
+        VStack(alignment: .leading) {
+            Text("\(title) \(current, format: .number.precision(.fractionLength(2)))")
+                .font(.caption)
+            Slider(value: extraConfigBinding(id, keyPath: keyPath), in: range) { editing in
+                if editing { viewModel.beginGesture() }
             }
         }
     }
@@ -175,6 +228,28 @@ struct InspectorView: View {
         Binding(
             get: { viewModel.preset.surfaces[s]?.gamma ?? 1.0 },
             set: { viewModel.preset.surfaces[s]?.gamma = $0 }
+        )
+    }
+
+    private func featherBinding(_ s: Surface) -> Binding<Double> {
+        Binding(
+            get: { viewModel.preset.surfaces[s]?.feather ?? 0.0 },
+            set: { viewModel.preset.surfaces[s]?.feather = $0 }
+        )
+    }
+
+    private func extraNameBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { viewModel.preset.extras.first { $0.id == id }?.name ?? "" },
+            set: { name in viewModel.updateExtra(id: id) { $0.name = name } }
+        )
+    }
+
+    private func extraConfigBinding(_ id: UUID,
+                                    keyPath: WritableKeyPath<SurfaceConfig, Double>) -> Binding<Double> {
+        Binding(
+            get: { viewModel.preset.extras.first { $0.id == id }?.config[keyPath: keyPath] ?? 1.0 },
+            set: { v in viewModel.updateExtra(id: id) { $0.config[keyPath: keyPath] = v } }
         )
     }
 

@@ -40,6 +40,8 @@ final class MappingViewModel {
 
     var selectedSurface: Surface? = .frontWall
     var selectedCorner: Quad.Corner?
+    /// 選択中の自由面(F-FREE-1)。コーナー3面の選択とは排他(UI側で切替時に相手をnilにする)。
+    var selectedExtraID: UUID?
     var isEditLocked = false             // F-UI-6
 
     // MARK: 依存
@@ -98,14 +100,10 @@ final class MappingViewModel {
     /// 各頂点の適用はmove()を通すため、頂点リンクも通常どおり解決される。
     func translate(surface: Surface, by delta: CGPoint, from base: Quad) {
         guard !isEditLocked else { return }
-        let corners = Quad.Corner.allCases.map { base[$0] }
-        guard let minX = corners.map(\.x).min(), let maxX = corners.map(\.x).max(),
-              let minY = corners.map(\.y).min(), let maxY = corners.map(\.y).max() else { return }
-        let dx = min(max(delta.x, -minX), 1 - maxX)
-        let dy = min(max(delta.y, -minY), 1 - maxY)
+        let clamped = Self.clampedDelta(delta, for: base)
         for c in Quad.Corner.allCases {
             let p = base[c]
-            move(corner: c, of: surface, to: CGPoint(x: p.x + dx, y: p.y + dy))
+            move(corner: c, of: surface, to: CGPoint(x: p.x + clamped.x, y: p.y + clamped.y))
         }
     }
 
@@ -115,14 +113,98 @@ final class MappingViewModel {
     /// 面同士の重複は意図的に許容する(F-CROP-3: 境界を重ねて継ぎ目の連続感を出す用途)。
     func setCrop(_ rect: CGRect, for surface: Surface) {
         guard !isEditLocked else { return }
+        preset.surfaces[surface]?.crop = Self.clampedCrop(rect)
+        preset.updatedAt = .now
+    }
+
+    /// setCrop/setExtraCropで共有するクランプ規則(0-1・最小サイズ5%)
+    static func clampedCrop(_ rect: CGRect) -> CGRect {
         let minSize: CGFloat = 0.05
         var r = rect
         r.size.width = min(max(r.width, minSize), 1)
         r.size.height = min(max(r.height, minSize), 1)
         r.origin.x = min(max(r.origin.x, 0), 1 - r.width)
         r.origin.y = min(max(r.origin.y, 0), 1 - r.height)
-        preset.surfaces[surface]?.crop = r
+        return r
+    }
+
+    // MARK: 自由面(F-FREE-1)
+
+    /// 自由面を追加し、選択状態にする。初期位置はキャンバス右下寄りの小矩形。
+    func addExtraSurface() {
+        guard !isEditLocked else { return }
+        pushUndo()
+        var extras = preset.extras
+        let config = SurfaceConfig(
+            crop: CGRect(x: 0.7, y: 0.7, width: 0.25, height: 0.25),
+            quad: Quad(rect: CGRect(x: 0.7, y: 0.72, width: 0.2, height: 0.2)))
+        extras.append(ExtraSurface(name: "追加面\(extras.count + 1)", config: config))
+        preset.extras = extras
+        selectedExtraID = extras.last?.id
+        selectedSurface = nil
+        selectedCorner = nil
         preset.updatedAt = .now
+    }
+
+    func removeExtraSurface(id: UUID) {
+        guard !isEditLocked else { return }
+        pushUndo()
+        preset.extras.removeAll { $0.id == id }
+        if selectedExtraID == id { selectedExtraID = nil }
+        preset.updatedAt = .now
+    }
+
+    /// 自由面の頂点移動(コーナー3面のmoveに相当。リンク解決はない)
+    func moveExtra(corner: Quad.Corner, id: UUID, to normalizedPoint: CGPoint) {
+        guard !isEditLocked else { return }
+        guard let i = preset.extras.firstIndex(where: { $0.id == id }) else { return }
+        var extras = preset.extras
+        extras[i].config.quad[corner] = Quad.clamped(normalizedPoint)
+        preset.extras = extras
+        preset.updatedAt = .now
+    }
+
+    /// 自由面の全体移動(translateの自由面版。形状保存クランプも同一規則)
+    func translateExtra(id: UUID, by delta: CGPoint, from base: Quad) {
+        guard !isEditLocked else { return }
+        guard let i = preset.extras.firstIndex(where: { $0.id == id }) else { return }
+        let clamped = Self.clampedDelta(delta, for: base)
+        var extras = preset.extras
+        for c in Quad.Corner.allCases {
+            let p = base[c]
+            extras[i].config.quad[c] = CGPoint(x: p.x + clamped.x, y: p.y + clamped.y)
+        }
+        preset.extras = extras
+        preset.updatedAt = .now
+    }
+
+    func setExtraCrop(_ rect: CGRect, id: UUID) {
+        guard !isEditLocked else { return }
+        guard let i = preset.extras.firstIndex(where: { $0.id == id }) else { return }
+        var extras = preset.extras
+        extras[i].config.crop = Self.clampedCrop(rect)
+        preset.extras = extras
+        preset.updatedAt = .now
+    }
+
+    /// 自由面の設定(明るさ/ガンマ/フェザー/名前)を更新する汎用ミューテータ
+    func updateExtra(id: UUID, _ mutate: (inout ExtraSurface) -> Void) {
+        guard let i = preset.extras.firstIndex(where: { $0.id == id }) else { return }
+        var extras = preset.extras
+        mutate(&extras[i])
+        preset.extras = extras
+        preset.updatedAt = .now
+    }
+
+    /// 全頂点が0-1に収まるようdeltaをクランプ(translate/translateExtra共通)
+    static func clampedDelta(_ delta: CGPoint, for base: Quad) -> CGPoint {
+        let corners = Quad.Corner.allCases.map { base[$0] }
+        guard let minX = corners.map(\.x).min(), let maxX = corners.map(\.x).max(),
+              let minY = corners.map(\.y).min(), let maxY = corners.map(\.y).max() else {
+            return .zero
+        }
+        return CGPoint(x: min(max(delta.x, -minX), 1 - maxX),
+                       y: min(max(delta.y, -minY), 1 - maxY))
     }
 
     private func resolveLinks(changed ref: CornerLink.CornerRef, to p: CGPoint) {

@@ -50,6 +50,11 @@ struct FrameComposer: Sendable {
             image = gamma.outputImage ?? image
         }
 
+        // 2.5) エッジフェザリング(F-WARP-7): 境界を柔らかくして継ぎ目を目立ちにくくする
+        if s.feather > 0 {
+            image = feathered(image, amount: s.feather)
+        }
+
         // 3) 射影変換: 入力extentの4隅を、キャンバス上の指定4点(CIピクセル座標)へ写す。
         //    CIPerspectiveTransformは数学的に正しいホモグラフィ補間を行う(三角形分割の折れが出ない)。
         let warp = CIFilter.perspectiveTransform()
@@ -59,5 +64,24 @@ struct FrameComposer: Sendable {
         warp.bottomRight = CoordinateMapper.ciPixel(fromNormalized: s.quad.bottomRight, canvasSize: canvasSize)
         warp.bottomLeft = CoordinateMapper.ciPixel(fromNormalized: s.quad.bottomLeft, canvasSize: canvasSize)
         return warp.outputImage ?? image
+    }
+
+    /// エッジフェザリング: 内側にinsetした白矩形をぼかしたものをアルファマスクとして適用する。
+    /// amountは短辺に対する割合(0-0.3)。ワープ前に適用するため、境界のぼけも一緒に変形される。
+    private func feathered(_ image: CIImage, amount: Double) -> CIImage {
+        let extent = image.extent
+        let inset = min(extent.width, extent.height) * CGFloat(amount) * 0.5
+        guard inset > 0.5 else { return image }
+
+        let blur = CIFilter.gaussianBlur()
+        blur.inputImage = CIImage(color: .white).cropped(to: extent.insetBy(dx: inset, dy: inset))
+        blur.radius = Float(inset / 2)
+        let mask = (blur.outputImage ?? CIImage(color: .white)).cropped(to: extent)
+
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = image
+        blend.backgroundImage = CIImage(color: .clear).cropped(to: extent)
+        blend.maskImage = mask
+        return (blend.outputImage ?? image).cropped(to: extent)
     }
 }

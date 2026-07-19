@@ -107,3 +107,89 @@ final class EditingTests: XCTestCase {
         XCTAssertNotEqual(vm.preset.calibrationFingerprint, before)
     }
 }
+
+/// 自由面(F-FREE-1)とフェザー(F-WARP-7)のテスト。
+@MainActor
+final class ExtraSurfaceTests: XCTestCase {
+
+    private func makeVM() -> MappingViewModel {
+        MappingViewModel(presetStore: InMemoryPresetStore())
+    }
+
+    /// 追加→選択→削除の基本サイクル
+    func testAddSelectRemoveExtra() {
+        let vm = makeVM()
+        XCTAssertTrue(vm.preset.extras.isEmpty)
+
+        vm.addExtraSurface()
+        XCTAssertEqual(vm.preset.extras.count, 1)
+        XCTAssertEqual(vm.selectedExtraID, vm.preset.extras.first?.id)
+        XCTAssertNil(vm.selectedSurface, "自由面選択時はコーナー面の選択が外れるはず")
+
+        let id = vm.preset.extras.first!.id
+        vm.removeExtraSurface(id: id)
+        XCTAssertTrue(vm.preset.extras.isEmpty)
+        XCTAssertNil(vm.selectedExtraID)
+    }
+
+    /// 追加/削除はアンドゥで戻せる
+    func testAddExtraIsUndoable() {
+        let vm = makeVM()
+        vm.addExtraSurface()
+        XCTAssertEqual(vm.preset.extras.count, 1)
+        vm.undo()
+        XCTAssertTrue(vm.preset.extras.isEmpty)
+    }
+
+    /// 自由面の頂点移動はクランプされる
+    func testMoveExtraClamps() {
+        let vm = makeVM()
+        vm.addExtraSurface()
+        let id = vm.preset.extras.first!.id
+        vm.moveExtra(corner: .topLeft, id: id, to: CGPoint(x: -5, y: 5))
+        XCTAssertEqual(vm.preset.extras.first?.config.quad.topLeft, CGPoint(x: 0, y: 1))
+    }
+
+    /// 自由面のクロップも最小サイズ・範囲クランプが効く
+    func testSetExtraCropClamps() {
+        let vm = makeVM()
+        vm.addExtraSurface()
+        let id = vm.preset.extras.first!.id
+        vm.setExtraCrop(CGRect(x: 2, y: 2, width: 0.001, height: 0.001), id: id)
+        let crop = vm.preset.extras.first!.config.crop
+        XCTAssertEqual(crop.width, 0.05, accuracy: 1e-9)
+        XCTAssertEqual(crop.maxX, 1.0, accuracy: 1e-9)
+    }
+
+    /// 自由面の追加・フェザー変更はfingerprintに反映される(ベイク陳腐化検知)
+    func testExtrasAndFeatherAffectFingerprint() {
+        let vm = makeVM()
+        let base = vm.preset.calibrationFingerprint
+
+        vm.addExtraSurface()
+        let withExtra = vm.preset.calibrationFingerprint
+        XCTAssertNotEqual(base, withExtra)
+
+        vm.preset.surfaces[.frontWall]?.feather = 0.15
+        XCTAssertNotEqual(withExtra, vm.preset.calibrationFingerprint)
+    }
+
+    /// extras未指定の旧JSONもデコードできる(後方互換)
+    func testDecodingLegacyJSONWithoutExtras() throws {
+        let legacy = MappingPreset.makeDefault()
+        // extraSurfaces/featherキーを含まないJSONを合成: 旧スキーマを再現するため
+        // いったんエンコードしてキーを削除する
+        let data = try JSONEncoder().encode(legacy)
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        root.removeValue(forKey: "extraSurfaces")
+        if var surfaces = root["surfaces"] as? [String: [String: Any]] {
+            for key in surfaces.keys { surfaces[key]?.removeValue(forKey: "feather") }
+            root["surfaces"] = surfaces
+        }
+        let legacyData = try JSONSerialization.data(withJSONObject: root)
+
+        let decoded = try JSONDecoder().decode(MappingPreset.self, from: legacyData)
+        XCTAssertTrue(decoded.extras.isEmpty)
+        XCTAssertEqual(decoded.surfaces[.frontWall]?.feather ?? -1, 0.0, accuracy: 1e-9)
+    }
+}

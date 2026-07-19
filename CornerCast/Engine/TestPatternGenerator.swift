@@ -104,7 +104,7 @@ final class TestPatternGenerator: FrameSource {
         border.stroke()
 
         // 面ラベル(中央)
-        let text = s.surface.displayName as NSString
+        let text = s.name as NSString
         let fontSize = max(24, min(rect.width, rect.height) * 0.22)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.boldSystemFont(ofSize: fontSize),
@@ -116,12 +116,13 @@ final class TestPatternGenerator: FrameSource {
         text.draw(at: origin, withAttributes: attributes)
     }
 
-    /// 面ごとの識別色(左壁=シアン / 正面壁=マゼンタ / 床=イエロー)
-    private static func identityColor(for surface: Surface) -> UIColor {
+    /// 面ごとの識別色(左壁=シアン / 正面壁=マゼンタ / 床=イエロー / 自由面=グリーン)
+    private static func identityColor(for surface: Surface?) -> UIColor {
         switch surface {
         case .leftWall: .cyan
         case .frontWall: .magenta
         case .floor: .yellow
+        case nil: .green
         }
     }
 
@@ -130,7 +131,7 @@ final class TestPatternGenerator: FrameSource {
         var parts: [String] = [String(format: "%.0fx%.0f", sourceSize.width, sourceSize.height)]
         for s in params.surfaces {
             parts.append(String(format: "%@:%.5f,%.5f,%.5f,%.5f",
-                                s.surface.rawValue,
+                                s.surface?.rawValue ?? "extra:\(s.name)",
                                 s.crop.origin.x, s.crop.origin.y,
                                 s.crop.width, s.crop.height))
         }

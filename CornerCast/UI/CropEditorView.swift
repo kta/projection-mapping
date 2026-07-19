@@ -7,8 +7,16 @@ struct CropEditorView: View {
     @Bindable var viewModel: MappingViewModel
     @Environment(\.dismiss) private var dismiss
 
-    /// ジェスチャ開始時のcrop(1ジェスチャ=1アンドゥ単位の基準値)
-    @State private var dragBase: [Surface: CGRect] = [:]
+    /// 編集対象(コーナー3面+自由面)を同一UIで扱うための共通表現
+    private struct CropTarget: Identifiable {
+        let id: String              // "core:<rawValue>" / "extra:<uuid>"
+        let name: String
+        let color: Color
+        let crop: CGRect
+    }
+
+    /// ジェスチャ開始時のcrop(1ジェスチャ=1アンドゥ単位の基準値)。CropTarget.idキー。
+    @State private var dragBase: [String: CGRect] = [:]
     @State private var sourceImage: UIImage?
     @State private var guideURL: URL?
 
@@ -19,10 +27,8 @@ struct CropEditorView: View {
                 ZStack {
                     Color.black
                     backgroundView(in: canvas)
-                    ForEach(Surface.drawOrder, id: \.self) { s in
-                        if let crop = viewModel.preset.surfaces[s]?.crop {
-                            cropRectView(s, crop: crop, canvas: canvas)
-                        }
+                    ForEach(cropTargets()) { target in
+                        cropRectView(target, canvas: canvas)
                     }
                 }
             }
@@ -75,18 +81,46 @@ struct CropEditorView: View {
         return p
     }
 
+    // MARK: - 編集対象の解決(コーナー3面+自由面)
+
+    private func cropTargets() -> [CropTarget] {
+        var targets: [CropTarget] = Surface.drawOrder.compactMap { s in
+            guard let crop = viewModel.preset.surfaces[s]?.crop else { return nil }
+            return CropTarget(id: "core:\(s.rawValue)", name: s.displayName,
+                              color: Self.color(for: s), crop: crop)
+        }
+        for e in viewModel.preset.extras {
+            targets.append(CropTarget(id: "extra:\(e.id.uuidString)", name: e.name,
+                                      color: .green, crop: e.config.crop))
+        }
+        return targets
+    }
+
+    private func currentCrop(id: String) -> CGRect? {
+        cropTargets().first { $0.id == id }?.crop
+    }
+
+    private func applyCrop(_ rect: CGRect, id: String) {
+        if id.hasPrefix("core:"), let s = Surface(rawValue: String(id.dropFirst(5))) {
+            viewModel.setCrop(rect, for: s)
+        } else if id.hasPrefix("extra:"), let uuid = UUID(uuidString: String(id.dropFirst(6))) {
+            viewModel.setExtraCrop(rect, id: uuid)
+        }
+    }
+
     // MARK: - クロップ矩形(移動+リサイズ)
 
-    private func cropRectView(_ s: Surface, crop: CGRect, canvas: CGRect) -> some View {
+    private func cropRectView(_ target: CropTarget, canvas: CGRect) -> some View {
+        let crop = target.crop
         let rect = CGRect(x: canvas.minX + crop.minX * canvas.width,
                           y: canvas.minY + crop.minY * canvas.height,
                           width: crop.width * canvas.width,
                           height: crop.height * canvas.height)
-        let color = Self.color(for: s)
+        let color = target.color
         return ZStack {
             Rectangle().fill(color.opacity(0.15))
             Rectangle().strokeBorder(color, lineWidth: 2)
-            Text(s.displayName)
+            Text(target.name)
                 .font(.caption).bold()
                 .foregroundStyle(color)
             // リサイズハンドル(右下)。移動ジェスチャより深い位置にあるため優先される。
@@ -96,44 +130,44 @@ struct CropEditorView: View {
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
                 .position(x: rect.width, y: rect.height)
-                .gesture(resizeGesture(s, canvas: canvas))
+                .gesture(resizeGesture(target.id, canvas: canvas))
         }
         .frame(width: rect.width, height: rect.height)
         .position(x: rect.midX, y: rect.midY)
-        .gesture(moveGesture(s, canvas: canvas))
+        .gesture(moveGesture(target.id, canvas: canvas))
         .allowsHitTesting(!viewModel.isEditLocked)
     }
 
-    private func moveGesture(_ s: Surface, canvas: CGRect) -> some Gesture {
+    private func moveGesture(_ id: String, canvas: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
-                if dragBase[s] == nil {
+                if dragBase[id] == nil {
                     viewModel.beginGesture()
-                    dragBase[s] = viewModel.preset.surfaces[s]?.crop
+                    dragBase[id] = currentCrop(id: id)
                 }
-                guard let base = dragBase[s] else { return }
-                viewModel.setCrop(
+                guard let base = dragBase[id] else { return }
+                applyCrop(
                     base.offsetBy(dx: value.translation.width / canvas.width,
                                   dy: value.translation.height / canvas.height),
-                    for: s)
+                    id: id)
             }
-            .onEnded { _ in dragBase[s] = nil }
+            .onEnded { _ in dragBase[id] = nil }
     }
 
-    private func resizeGesture(_ s: Surface, canvas: CGRect) -> some Gesture {
+    private func resizeGesture(_ id: String, canvas: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
-                if dragBase[s] == nil {
+                if dragBase[id] == nil {
                     viewModel.beginGesture()
-                    dragBase[s] = viewModel.preset.surfaces[s]?.crop
+                    dragBase[id] = currentCrop(id: id)
                 }
-                guard let base = dragBase[s] else { return }
+                guard let base = dragBase[id] else { return }
                 let newSize = CGSize(
                     width: base.width + value.translation.width / canvas.width,
                     height: base.height + value.translation.height / canvas.height)
-                viewModel.setCrop(CGRect(origin: base.origin, size: newSize), for: s)
+                applyCrop(CGRect(origin: base.origin, size: newSize), id: id)
             }
-            .onEnded { _ in dragBase[s] = nil }
+            .onEnded { _ in dragBase[id] = nil }
     }
 
     // MARK: - ガイドPNG書き出し(F-SRC-5)

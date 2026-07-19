@@ -59,6 +59,32 @@ final class FrameComposerTests: XCTestCase {
     func testRenderParametersOrderedByDrawOrder() {
         let params = RenderParameters(canvasSize: CGSize(width: 1920, height: 1080),
                                       preset: .makeDefault())
-        XCTAssertEqual(params.surfaces.map { $0.surface }, Surface.drawOrder)
+        XCTAssertEqual(params.surfaces.compactMap { $0.surface }, Surface.drawOrder)
+        XCTAssertEqual(params.surfaces.count, 3)
+    }
+
+    /// 自由面はコーナー3面の後に配列順で並ぶ(surface=nil, nameを保持)
+    func testRenderParametersAppendsExtras() {
+        var preset = MappingPreset.makeDefault()
+        let config = SurfaceConfig(crop: CGRect(x: 0.5, y: 0.5, width: 0.2, height: 0.2),
+                                   quad: Quad(rect: CGRect(x: 0.5, y: 0.5, width: 0.2, height: 0.2)))
+        preset.extras = [ExtraSurface(name: "柱", config: config)]
+
+        let params = RenderParameters(canvasSize: CGSize(width: 1920, height: 1080),
+                                      preset: preset)
+        XCTAssertEqual(params.surfaces.count, 4)
+        XCTAssertNil(params.surfaces.last?.surface)
+        XCTAssertEqual(params.surfaces.last?.name, "柱")
+    }
+
+    /// フェザーあり(F-WARP-7)でもレシピ構築でクラッシュせず、extentが保たれる
+    func testComposeWithFeatherDoesNotCrash() {
+        let canvas = CGSize(width: 1920, height: 1080)
+        var preset = MappingPreset.makeDefault()
+        preset.surfaces[.frontWall]?.feather = 0.2
+        let params = RenderParameters(canvasSize: canvas, preset: preset)
+
+        let result = composer.compose(frame: makeFrame(), params: params)
+        XCTAssertEqual(result.extent, CGRect(origin: .zero, size: canvas))
     }
 }
