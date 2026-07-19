@@ -17,7 +17,9 @@ struct InspectorView: View {
             selectionSection
             nudgeSection
             colorSection
+            meshSection
             extrasSection
+            maskSection
             linkSection
             resetSection
         }
@@ -104,6 +106,20 @@ struct InspectorView: View {
         }
     }
 
+    // MARK: メッシュワープ(F-MESH-1)
+
+    /// 選択中のコーナー面のメッシュワープ有効/無効。自由面のトグルはextrasSection内。
+    @ViewBuilder private var meshSection: some View {
+        if let s = viewModel.selectedSurface {
+            Section("ワープ") {
+                Toggle(isOn: meshBinding(s)) {
+                    Label("メッシュワープ(4×4)", systemImage: "grid")
+                }
+                .disabled(viewModel.isEditLocked)
+            }
+        }
+    }
+
     // MARK: 自由面(F-FREE-1)
 
     @ViewBuilder private var extrasSection: some View {
@@ -125,6 +141,10 @@ struct InspectorView: View {
                             current: extra.config.gamma)
                 extraSlider("エッジぼかし", id: id, keyPath: \.feather, range: 0...0.3,
                             current: extra.config.feather)
+                Toggle(isOn: extraMeshBinding(id)) {
+                    Label("メッシュワープ(4×4)", systemImage: "grid")
+                }
+                .disabled(viewModel.isEditLocked)
                 Button(role: .destructive) {
                     viewModel.removeExtraSurface(id: id)
                 } label: {
@@ -145,6 +165,34 @@ struct InspectorView: View {
                 .font(.caption)
             Slider(value: extraConfigBinding(id, keyPath: keyPath), in: range) { editing in
                 if editing { viewModel.beginGesture() }
+            }
+        }
+    }
+
+    // MARK: 出力マスク(F-MASK-1)
+
+    @ViewBuilder private var maskSection: some View {
+        Section("マスク") {
+            Button {
+                viewModel.addMask()
+            } label: {
+                Label("マスクを追加", systemImage: "plus.square")
+            }
+            .disabled(viewModel.isEditLocked)
+
+            if let id = viewModel.selectedMaskID,
+               viewModel.preset.maskShapes.contains(where: { $0.id == id }) {
+                TextField("名前", text: maskNameBinding(id))
+                    .textFieldStyle(.roundedBorder)
+                Button(role: .destructive) {
+                    viewModel.removeMask(id: id)
+                } label: {
+                    Label("このマスクを削除", systemImage: "trash")
+                }
+                .disabled(viewModel.isEditLocked)
+            } else if !viewModel.preset.maskShapes.isEmpty {
+                Text("キャンバス上のマスク(赤)をタップすると編集できます")
+                    .foregroundStyle(.secondary).font(.caption)
             }
         }
     }
@@ -235,6 +283,33 @@ struct InspectorView: View {
         Binding(
             get: { viewModel.preset.surfaces[s]?.feather ?? 0.0 },
             set: { viewModel.preset.surfaces[s]?.feather = $0 }
+        )
+    }
+
+    /// コーナー面のメッシュワープ有効/無効(setMeshEnabledでアンドゥ・初期化を通す)
+    private func meshBinding(_ s: Surface) -> Binding<Bool> {
+        Binding(
+            get: { viewModel.preset.surfaces[s]?.mesh != nil },
+            set: { viewModel.setMeshEnabled($0, for: s) }
+        )
+    }
+
+    /// 自由面のメッシュワープ有効/無効(setExtraMeshEnabled経由)
+    private func extraMeshBinding(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { viewModel.preset.extras.first { $0.id == id }?.config.mesh != nil },
+            set: { viewModel.setExtraMeshEnabled($0, id: id) }
+        )
+    }
+
+    /// マスク名。名前変更APIが無いためpreset.maskShapesを直接更新する(didSetで自動保存)。
+    private func maskNameBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { viewModel.preset.maskShapes.first { $0.id == id }?.name ?? "" },
+            set: { name in
+                guard let i = viewModel.preset.maskShapes.firstIndex(where: { $0.id == id }) else { return }
+                viewModel.preset.maskShapes[i].name = name
+            }
         )
     }
 
