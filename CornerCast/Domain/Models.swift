@@ -300,11 +300,11 @@ struct MappingPreset: Codable, Equatable, Identifiable, Sendable {
         var caption: String {
             switch self {
             case .cornerCockpit:
-                return "左壁・正面壁・床のコーナーに投影する定番構成。頂点リンクで継ぎ目もぴったり。"
+                return "お部屋の角(左の壁・正面の壁・床)に映して、映像に囲まれる空間をつくります。順番にご案内するので、はじめてでも大丈夫。"
             case .freeform:
-                return "白紙から始めて、面を好きな数だけ追加。柱・天井・オブジェクトへの汎用マッピング。"
+                return "白紙から始めて、映す場所を自由に追加。柱・天井・棚など、好きなところに映せます。"
             case .sample:
-                return "調整済みのデモ構成をテストパターン付きで表示。まず動きを見たい人向け。"
+                return "まずはお手本を見てみたい方に。調整済みのデモをすぐに表示します。"
             }
         }
 

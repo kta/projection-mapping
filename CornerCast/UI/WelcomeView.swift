@@ -11,11 +11,21 @@ struct WelcomeView: View {
     @Bindable var viewModel: MappingViewModel
     @Environment(\.dismiss) private var dismiss
 
+    /// 「3面コーナー」選択後はカードの代わりに、かんたんセットアップ(F-EASY-1)を
+    /// この画面内でそのまま表示する(ネスト表示にせず入れ替える — 閉じる動線が一本になる)。
+    @State private var startedSimpleSetup = false
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            content
-            closeButton
+            if startedSimpleSetup {
+                SimpleSetupView(viewModel: viewModel) {
+                    dismiss()
+                }
+            } else {
+                content
+                closeButton
+            }
         }
         .preferredColorScheme(.dark)
     }
@@ -54,7 +64,15 @@ struct WelcomeView: View {
         ForEach(MappingPreset.ProjectTemplate.allCases) { template in
             TemplateCard(template: template) {
                 viewModel.apply(template: template)
-                dismiss()
+                if template == .cornerCockpit {
+                    // 初心者の主用途はガイドで完了まで手を引く(F-EASY-1)。
+                    // プロ用エディタは「くわしい設定を使う」からいつでも到達できる。
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        startedSimpleSetup = true
+                    }
+                } else {
+                    dismiss()
+                }
             }
         }
     }
