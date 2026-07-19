@@ -292,13 +292,13 @@ final class OSCMessageParseTests: XCTestCase {
     /// Float32(ビッグエンディアン・4バイト)
     private func oscFloat(_ value: Float) -> Data {
         var be = value.bitPattern.bigEndian
-        return withUnsafeBytes(of: &be) { Data($0) }
+        return Data(bytes: &be, count: 4)
     }
 
     /// Int32(ビッグエンディアン・4バイト)
     private func oscInt(_ value: Int32) -> Data {
         var be = UInt32(bitPattern: value).bigEndian
-        return withUnsafeBytes(of: &be) { Data($0) }
+        return Data(bytes: &be, count: 4)
     }
 
     /// 単一OSCメッセージ: アドレス + 型タグ(","始まり) + 引数群
