@@ -8,6 +8,9 @@ import UniformTypeIdentifiers
 /// - List: PresetStore.listPresets()。行タップで読み込み、スワイプ削除、名前変更。
 /// - 「現在の状態を保存」ボタン(名前入力)。
 /// - JSON書き出し(ShareLink)/読み込み(fileImporter)(F-PRESET-3)。
+///
+/// 注意: bodyの型チェック時間爆発を避けるため、セクション・Binding・行ビューを
+/// 小さな部品へ分割している(CIで実測したコンパイルエラーへの対処)。安易に統合しないこと。
 struct PresetListView: View {
     @Bindable var viewModel: MappingViewModel
     @Environment(\.dismiss) private var dismiss
@@ -25,97 +28,114 @@ struct PresetListView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    Button {
-                        newName = viewModel.preset.name
-                        showSaveDialog = true
-                    } label: {
-                        Label("現在の状態を保存", systemImage: "square.and.arrow.down")
-                    }
-                    if let exportURL {
-                        ShareLink(item: exportURL) {
-                            Label("現在のプリセットを書き出し", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                    Button {
-                        showImporter = true
-                    } label: {
-                        Label("JSONを読み込み", systemImage: "tray.and.arrow.down")
+            listContent
+                .navigationTitle("プリセット")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("閉じる") { dismiss() }
                     }
                 }
+                .onAppear {
+                    reload()
+                    prepareExport()
+                }
+        }
+    }
 
-                Section("保存済みプリセット") {
-                    if presets.isEmpty {
-                        Text("保存済みのプリセットはありません")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(presets) { preset in
-                        Button {
-                            viewModel.preset = preset
-                            dismiss()
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(preset.name)
-                                    .foregroundStyle(.primary)
-                                Text(preset.updatedAt.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                delete(preset)
-                            } label: {
-                                Label("削除", systemImage: "trash")
-                            }
-                            Button {
-                                renaming = preset
-                                renameText = preset.name
-                            } label: {
-                                Label("名前変更", systemImage: "pencil")
-                            }
-                            .tint(.blue)
-                        }
-                    }
+    private var listContent: some View {
+        List {
+            actionsSection
+            savedPresetsSection
+        }
+        .modifier(PresetListDialogs(
+            showSaveDialog: $showSaveDialog,
+            newName: $newName,
+            renamePresented: renamePresented,
+            renameText: $renameText,
+            showImporter: $showImporter,
+            errorPresented: errorPresented,
+            errorMessage: errorMessage,
+            onSave: saveCurrent,
+            onRename: commitRename,
+            onImport: importJSON
+        ))
+    }
+
+    // MARK: - セクション
+
+    private var actionsSection: some View {
+        Section {
+            Button {
+                newName = viewModel.preset.name
+                showSaveDialog = true
+            } label: {
+                Label("現在の状態を保存", systemImage: "square.and.arrow.down")
+            }
+            if let exportURL {
+                ShareLink(item: exportURL) {
+                    Label("現在のプリセットを書き出し", systemImage: "square.and.arrow.up")
                 }
             }
-            .navigationTitle("プリセット")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { dismiss() }
-                }
-            }
-            .onAppear {
-                reload()
-                prepareExport()
-            }
-            .alert("プリセット名", isPresented: $showSaveDialog) {
-                TextField("名前", text: $newName)
-                Button("保存") { saveCurrent() }
-                Button("キャンセル", role: .cancel) {}
-            }
-            .alert("名前変更",
-                   isPresented: Binding(get: { renaming != nil },
-                                        set: { if !$0 { renaming = nil } })) {
-                TextField("名前", text: $renameText)
-                Button("保存") { commitRename() }
-                Button("キャンセル", role: .cancel) {}
-            }
-            .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [.json],
-                          allowsMultipleSelection: false) { result in
-                importJSON(result)
-            }
-            .alert("エラー",
-                   isPresented: Binding(get: { errorMessage != nil },
-                                        set: { if !$0 { errorMessage = nil } })) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(errorMessage ?? "")
+            Button {
+                showImporter = true
+            } label: {
+                Label("JSONを読み込み", systemImage: "tray.and.arrow.down")
             }
         }
+    }
+
+    private var savedPresetsSection: some View {
+        Section("保存済みプリセット") {
+            if presets.isEmpty {
+                Text("保存済みのプリセットはありません")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(presets) { preset in
+                presetRow(preset)
+            }
+        }
+    }
+
+    private func presetRow(_ preset: MappingPreset) -> some View {
+        Button {
+            viewModel.preset = preset
+            dismiss()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(preset.name)
+                    .foregroundStyle(.primary)
+                Text(preset.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                delete(preset)
+            } label: {
+                Label("削除", systemImage: "trash")
+            }
+            Button {
+                renaming = preset
+                renameText = preset.name
+            } label: {
+                Label("名前変更", systemImage: "pencil")
+            }
+            .tint(.blue)
+        }
+    }
+
+    // MARK: - Binding(型チェック分割のため計算プロパティ化)
+
+    private var renamePresented: Binding<Bool> {
+        Binding(get: { renaming != nil },
+                set: { if !$0 { renaming = nil } })
+    }
+
+    private var errorPresented: Binding<Bool> {
+        Binding(get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } })
     }
 
     // MARK: - ロジック
@@ -199,5 +219,42 @@ struct PresetListView: View {
         case .failure(let error):
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+/// ダイアログ・シート群をまとめたModifier。bodyの式を小さく保つための分割。
+private struct PresetListDialogs: ViewModifier {
+    @Binding var showSaveDialog: Bool
+    @Binding var newName: String
+    var renamePresented: Binding<Bool>
+    @Binding var renameText: String
+    @Binding var showImporter: Bool
+    var errorPresented: Binding<Bool>
+    var errorMessage: String?
+    var onSave: () -> Void
+    var onRename: () -> Void
+    var onImport: (Result<[URL], Error>) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .alert("プリセット名", isPresented: $showSaveDialog) {
+                TextField("名前", text: $newName)
+                Button("保存", action: onSave)
+                Button("キャンセル", role: .cancel) {}
+            }
+            .alert("名前変更", isPresented: renamePresented) {
+                TextField("名前", text: $renameText)
+                Button("保存", action: onRename)
+                Button("キャンセル", role: .cancel) {}
+            }
+            .fileImporter(isPresented: $showImporter,
+                          allowedContentTypes: [.json],
+                          allowsMultipleSelection: false,
+                          onCompletion: onImport)
+            .alert("エラー", isPresented: errorPresented) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
     }
 }

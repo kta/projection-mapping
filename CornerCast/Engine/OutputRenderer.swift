@@ -50,8 +50,9 @@ final class OutputRenderer: NSObject {
 
     func start(on screen: UIScreen) {
         guard displayLink == nil else { return }   // 二重startを無視
-        // 接続先ディスプレイのリフレッシュレートに同期したCADisplayLink
-        let link = screen.displayLink(withTarget: self, selector: #selector(renderTick(_:)))
+        // 接続先ディスプレイのリフレッシュレートに同期したCADisplayLink(戻り値はOptional)
+        guard let link = screen.displayLink(withTarget: self,
+                                            selector: #selector(renderTick(_:))) else { return }
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
