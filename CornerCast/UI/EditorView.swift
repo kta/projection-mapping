@@ -15,6 +15,8 @@ struct EditorView: View {
 
     @State private var showContentPicker = false
     @State private var showPresetList = false
+    @State private var showCropEditor = false
+    @State private var showHelp = false
 
     var body: some View {
         NavigationStack {
@@ -44,6 +46,11 @@ struct EditorView: View {
                     } label: {
                         Label("テストパターン", systemImage: "grid")
                     }
+                    Button {
+                        showCropEditor = true
+                    } label: {
+                        Label("クロップ", systemImage: "crop")
+                    }
                 }
                 // モード切替(RT / ベイク)
                 ToolbarItem(placement: .principal) {
@@ -61,6 +68,11 @@ struct EditorView: View {
                     } label: {
                         Label("プリセット", systemImage: "slider.horizontal.3")
                     }
+                    Button {
+                        showHelp = true
+                    } label: {
+                        Label("ヘルプ", systemImage: "questionmark.circle")
+                    }
                     outputStatusIndicator
                 }
             }
@@ -69,6 +81,12 @@ struct EditorView: View {
             }
             .sheet(isPresented: $showPresetList) {
                 PresetListView(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showCropEditor) {
+                CropEditorView(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showHelp) {
+                HelpView()
             }
         }
     }

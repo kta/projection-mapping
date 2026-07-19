@@ -40,6 +40,22 @@ final class EditorPreviewRenderer {
         }
     }
 
+    /// クロップ編集(F-CROP-2)用: ワープを掛けない「ソース映像そのもの」のプレビュー。
+    /// テストパターンはクロップ構成に依存して描かれる(循環する)ため対象外とし、
+    /// 呼び出し側はグリッド背景へフォールバックする。
+    func sourcePreview(content: MappingViewModel.ContentSource, size: CGSize) -> UIImage? {
+        switch content {
+        case .image(let url):
+            guard let ci = CIImage(contentsOf: url) else { return nil }
+            return uiImage(from: scaled(ci, to: size), size: size)
+        case .video(let url), .bakedVideo(let url):
+            guard let poster = posterFrame(for: url) else { return nil }
+            return uiImage(from: scaled(poster, to: size), size: size)
+        case .none, .testPattern:
+            return nil
+        }
+    }
+
     // MARK: - ソースフレーム取得
 
     private func sourceFrame(for content: MappingViewModel.ContentSource,

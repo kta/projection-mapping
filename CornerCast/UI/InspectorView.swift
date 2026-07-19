@@ -81,12 +81,16 @@ struct InspectorView: View {
                 VStack(alignment: .leading) {
                     Text("明るさ \(brightnessBinding(s).wrappedValue, format: .number.precision(.fractionLength(2)))")
                         .font(.caption)
-                    Slider(value: brightnessBinding(s), in: 0.25...2.0)
+                    Slider(value: brightnessBinding(s), in: 0.25...2.0) { editing in
+                        if editing { viewModel.beginGesture() }   // 1操作=1アンドゥ単位
+                    }
                 }
                 VStack(alignment: .leading) {
                     Text("ガンマ \(gammaBinding(s).wrappedValue, format: .number.precision(.fractionLength(2)))")
                         .font(.caption)
-                    Slider(value: gammaBinding(s), in: 0.25...4.0)
+                    Slider(value: gammaBinding(s), in: 0.25...4.0) { editing in
+                        if editing { viewModel.beginGesture() }
+                    }
                 }
             }
         }
@@ -159,8 +163,7 @@ struct InspectorView: View {
     }
 
     // 明るさ/ガンマは preset を直接更新(didSetで自動保存)。
-    // TODO(UI-2): これらは pushUndo を通らないためアンドゥ非対応。
-    //   ViewModelに公開のpushUndoが無いので現状は割り切り。必要なら要相談。
+    // アンドゥはSliderのonEditingChanged開始時に beginGesture を積むことで対応済み。
     private func brightnessBinding(_ s: Surface) -> Binding<Double> {
         Binding(
             get: { viewModel.preset.surfaces[s]?.brightness ?? 1.0 },

@@ -17,6 +17,8 @@ struct MeshCanvasView: View {
     private static let space = "CornerCast.canvas"
     /// 合成プレビュー(F-OUT-4)。EditorPreviewRendererがデバウンス付きで更新する。
     @State private var previewImage: UIImage?
+    /// 面全体ドラッグ(F-UI-7)のジェスチャ開始時quad
+    @State private var surfaceDragBase: [Surface: Quad] = [:]
 
     var body: some View {
         GeometryReader { geo in
@@ -40,6 +42,13 @@ struct MeshCanvasView: View {
                 ForEach(Surface.drawOrder, id: \.self) { s in
                     if let quad = viewModel.preset.surfaces[s]?.quad {
                         let selected = viewModel.selectedSurface == s
+                        // 面の内側をドラッグすると面全体を平行移動(F-UI-7)。
+                        // ほぼ透明のfillでヒット領域を作る(コントロールポイントは
+                        // ZStackの後段にあるため点のドラッグが優先される)。
+                        quadPath(quad, in: canvasRect)
+                            .fill(Color.white.opacity(0.001))
+                            .gesture(surfaceDragGesture(s, canvasRect: canvasRect))
+                            .allowsHitTesting(!viewModel.isEditLocked)
                         quadPath(quad, in: canvasRect)
                             .stroke(color(for: s),
                                     style: StrokeStyle(lineWidth: selected ? 3 : 1.5,
@@ -68,6 +77,13 @@ struct MeshCanvasView: View {
                 }
             }
             .coordinateSpace(name: Self.space)
+            // ハードウェアキーボード微調整: 矢印=±1px、Shift+矢印=±10px
+            // (iPadの外付けキーボード / Mac Catalyst向け)
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress { press in
+                handleKeyPress(press)
+            }
             .task(id: previewKey) {
                 // 連続ドラッグ中の再描画を間引く(120msデバウンス)。
                 // .task(id:) はキー変化時に前回タスクを自動キャンセルする。
@@ -80,6 +96,43 @@ struct MeshCanvasView: View {
             }
         }
         .background(Color.black)
+    }
+
+    /// 面全体の平行移動ジェスチャ(F-UI-7)
+    private func surfaceDragGesture(_ s: Surface, canvasRect: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.space))
+            .onChanged { value in
+                viewModel.selectedSurface = s
+                if surfaceDragBase[s] == nil {
+                    viewModel.beginGesture()   // 1ジェスチャ=1アンドゥ単位
+                    surfaceDragBase[s] = viewModel.preset.surfaces[s]?.quad
+                }
+                guard let base = surfaceDragBase[s], canvasRect.width > 0 else { return }
+                let delta = CGPoint(x: value.translation.width / canvasRect.width,
+                                    y: value.translation.height / canvasRect.height)
+                viewModel.translate(surface: s, by: delta, from: base)
+            }
+            .onEnded { _ in surfaceDragBase[s] = nil }
+    }
+
+    /// 矢印キーによる微調整(選択中の頂点が対象)
+    private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
+        guard let s = viewModel.selectedSurface, let c = viewModel.selectedCorner,
+              !viewModel.isEditLocked else { return .ignored }
+        let step: Double = press.modifiers.contains(.shift) ? 10 : 1
+        switch press.key {
+        case .upArrow:
+            viewModel.nudge(corner: c, of: s, dx: 0, dy: -step)
+        case .downArrow:
+            viewModel.nudge(corner: c, of: s, dx: 0, dy: step)
+        case .leftArrow:
+            viewModel.nudge(corner: c, of: s, dx: -step, dy: 0)
+        case .rightArrow:
+            viewModel.nudge(corner: c, of: s, dx: step, dy: 0)
+        default:
+            return .ignored
+        }
+        return .handled
     }
 
     /// プレビュー再描画のトリガキー(ワープ結果に影響する状態のみ)

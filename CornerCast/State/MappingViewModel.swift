@@ -93,6 +93,38 @@ final class MappingViewModel {
              to: CGPoint(x: current.x + dx * unit, y: current.y + dy * unit))
     }
 
+    /// 面全体を平行移動する(F-UI-7)。baseはジェスチャ開始時のquad。
+    /// 全頂点が0-1に収まるようdeltaを事前クランプし、形状を保ったまま動かす。
+    /// 各頂点の適用はmove()を通すため、頂点リンクも通常どおり解決される。
+    func translate(surface: Surface, by delta: CGPoint, from base: Quad) {
+        guard !isEditLocked else { return }
+        let corners = Quad.Corner.allCases.map { base[$0] }
+        guard let minX = corners.map(\.x).min(), let maxX = corners.map(\.x).max(),
+              let minY = corners.map(\.y).min(), let maxY = corners.map(\.y).max() else { return }
+        let dx = min(max(delta.x, -minX), 1 - maxX)
+        let dy = min(max(delta.y, -minY), 1 - maxY)
+        for c in Quad.Corner.allCases {
+            let p = base[c]
+            move(corner: c, of: surface, to: CGPoint(x: p.x + dx, y: p.y + dy))
+        }
+    }
+
+    // MARK: クロップ編集(F-CROP-2/3)
+
+    /// クロップ矩形を更新する。0-1へのクランプと最小サイズ(5%)を保証する。
+    /// 面同士の重複は意図的に許容する(F-CROP-3: 境界を重ねて継ぎ目の連続感を出す用途)。
+    func setCrop(_ rect: CGRect, for surface: Surface) {
+        guard !isEditLocked else { return }
+        let minSize: CGFloat = 0.05
+        var r = rect
+        r.size.width = min(max(r.width, minSize), 1)
+        r.size.height = min(max(r.height, minSize), 1)
+        r.origin.x = min(max(r.origin.x, 0), 1 - r.width)
+        r.origin.y = min(max(r.origin.y, 0), 1 - r.height)
+        preset.surfaces[surface]?.crop = r
+        preset.updatedAt = .now
+    }
+
     private func resolveLinks(changed ref: CornerLink.CornerRef, to p: CGPoint) {
         for link in preset.links where link.enabled {
             if link.a == ref {
