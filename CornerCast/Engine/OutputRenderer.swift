@@ -5,26 +5,22 @@ import UIKit
 
 /// リアルタイムモードのレンダラ(F-RT-1): CADisplayLink駆動で
 /// FrameSource → FrameComposer → CAMetalLayer に毎フレーム描画する。
-///
-/// TODO(TASK ENG-3 / 担当: engine agent):
-/// 実装要点(設計書§3.3・§5、調査レポート§2の確定事項):
-/// - CIContextは1つを生成して保持(毎フレーム生成禁止)。
-///   CIContext(mtlDevice:options:[.cacheIntermediates: false])。
-/// - CADisplayLinkは「外部ディスプレイのUIScreen」から生成する
-///   (screen.displayLink(withTarget:selector:) — 接続先リフレッシュレートに同期)。
-/// - 毎tick: source.copyFrame → paramsProvider() → composer.compose →
-///   metalLayer.nextDrawable → ciContext.render(_:to:commandBuffer:bounds:colorSpace:) → present。
-///   新フレームがnilなら前回のcomposed結果を再利用(パラメータが変わった場合があるため
-///   ワープは再実行する)。drawable取得失敗時はそのtickをスキップ。
-/// - metalLayer.drawableSize は外部画面のピクセル解像度に設定(F-OUT-5)。
-/// - サーマル対応(N-THERM-1): ProcessInfo.thermalStateを監視し、
-///   .serious以上でレンダリング解像度を75%→50%に段階降格(canvasSizeをスケール)。
-/// - start()/stop() は冪等にする(シーン切断で二重stopが起こり得る)。
-/// - paramsProviderはMainActorのViewModelを直接触らず、値型スナップショットを受け取る。
-///   スナップショットの受け渡しはロック(OSAllocatedUnfairLock)経由で行う。
+/// 設計書§3.3・§5、調査レポート§2の確定事項に沿う。
 final class OutputRenderer {
     private let composer: FrameComposer
     private var displayLink: CADisplayLink?
+
+    // Metal / Core Image は使い回す(毎フレーム生成禁止)
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let ciContext: CIContext
+    private let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+    /// 直近に取得できたソースフレーム(生のCIImage)。
+    /// 新フレームがないtickではこれを使って「同じ絵を最新パラメータで再ワープ」する。
+    private var lastFrame: CIImage?
+    /// metalLayer.drawableSize の無駄な再設定を避けるための記録
+    private var currentDrawableSize: CGSize = .zero
 
     /// レンダリング対象。ExternalSceneDelegateが接続時に設定する。
     weak var metalLayer: CAMetalLayer?
@@ -35,13 +31,87 @@ final class OutputRenderer {
 
     init(composer: FrameComposer) {
         self.composer = composer
+        // iPadでは常にMetalが利用可能。生成失敗は環境不整合なので早期に落とす。
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let commandQueue = device.makeCommandQueue() else {
+            fatalError("Metalデバイス/コマンドキューを生成できません")
+        }
+        self.device = device
+        self.commandQueue = commandQueue
+        // 動画は毎フレーム内容が変わるため中間キャッシュは無効化(WWDC20-10008)。
+        // CIContextはMTLCommandQueueと同一にし、GPUのwaitバブルを避ける。
+        self.ciContext = CIContext(mtlCommandQueue: commandQueue,
+                                   options: [.cacheIntermediates: false])
     }
 
+    // MARK: - ライフサイクル(start/stopは冪等)
+
     func start(on screen: UIScreen) {
-        // TODO: ENG-3
+        guard displayLink == nil else { return }   // 二重startを無視
+        // 接続先ディスプレイのリフレッシュレートに同期したCADisplayLink
+        let link = screen.displayLink(withTarget: self, selector: #selector(renderTick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
     }
 
     func stop() {
-        // TODO: ENG-3
+        guard let link = displayLink else { return }   // 二重stopを無視
+        link.invalidate()
+        displayLink = nil
+    }
+
+    // MARK: - 毎フレーム描画
+
+    @objc private func renderTick(_ link: CADisplayLink) {
+        guard let metalLayer, let paramsProvider else { return }
+
+        var params = paramsProvider()
+        guard params.canvasSize.width > 0, params.canvasSize.height > 0 else { return }
+
+        // サーマル降格(N-THERM-1): レンダリング解像度をスケールする。
+        // quadは正規化座標なのでcanvasSizeを縮めるだけで全体が比例縮小される。
+        let scale = Self.thermalScale()
+        let renderSize = CGSize(
+            width: max(1, (params.canvasSize.width * scale).rounded(.down)),
+            height: max(1, (params.canvasSize.height * scale).rounded(.down))
+        )
+        params.canvasSize = renderSize
+
+        // CIContextで描画するための必須設定を防御的に反映(レイヤ生成はScene側の責務)
+        if metalLayer.device == nil { metalLayer.device = device }
+        metalLayer.framebufferOnly = false   // CIContextの描画に必要
+        if currentDrawableSize != renderSize {
+            metalLayer.drawableSize = renderSize   // 縮小分はレイヤが物理解像度へ拡大表示
+            currentDrawableSize = renderSize
+        }
+
+        // 新フレームを取得。無ければ前フレームを再利用(最新パラメータで再ワープする)。
+        if let newFrame = source?.copyFrame(forHostTime: link.targetTimestamp) {
+            lastFrame = newFrame
+        }
+        guard let frame = lastFrame else { return }   // まだ1枚も来ていない
+
+        let composed = composer.compose(frame: frame, params: params)
+
+        // drawable取得に失敗したtickはスキップ(前フレームは表示されたまま)
+        guard let drawable = metalLayer.nextDrawable(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+
+        ciContext.render(composed,
+                         to: drawable.texture,
+                         commandBuffer: commandBuffer,
+                         bounds: composed.extent,
+                         colorSpace: colorSpace)
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+
+    /// thermalStateに応じた解像度スケール(.serious→75%, .critical→50%)
+    private static func thermalScale() -> CGFloat {
+        switch ProcessInfo.processInfo.thermalState {
+        case .critical: 0.5
+        case .serious: 0.75
+        default: 1.0
+        }
     }
 }

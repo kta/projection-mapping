@@ -8,29 +8,81 @@ protocol FrameSource: AnyObject {
     func copyFrame(forHostTime hostTime: CFTimeInterval) -> CIImage?
 }
 
-/// TODO(TASK ENG-2 / 担当: engine agent):
-/// AVPlayer + AVPlayerItemVideoOutput によるプル型動画ソース。
-/// 実装要点(設計書§3.3・調査レポート§2の確定事項):
-/// - AVPlayerItemVideoOutputのpixelBufferAttributesは
-///   kCVPixelFormatType_420YpCbCr8BiPlanarFullRange を指定(YUVのままCIに渡す)。
-/// - copyFrame: itemTime(forHostTime:) → hasNewPixelBuffer → copyPixelBuffer → CIImage。
-/// - ループ再生(F-SRC-3)は AVPlayerLooper + AVQueuePlayer で実装(シームレス)。
-/// - 再生/一時停止/シーク/音量(F-SRC-4)を公開する。
-/// - 静止画は StillImageSource(下記)を使う。ロード失敗はthrowしUI側でアラート表示。
+/// AVQueuePlayer + AVPlayerLooper + AVPlayerItemVideoOutput によるプル型動画ソース。
+/// 設計書§3.3・調査レポート§2の確定事項に沿う。
+///
+/// ループ実装の要点(重要): AVPlayerLooper はテンプレートitemの「コピー」を
+/// キューへ流し込む。したがってvideoOutputをテンプレートitemに付けても、実際に
+/// 再生されるコピーitemからはピクセルバッファを取得できない。そこで
+/// player.currentItem をKVO監視し、現在再生中のitemへvideoOutputを付け替える。
 final class VideoSource: FrameSource {
     private(set) var player: AVQueuePlayer?
 
+    private let templateItem: AVPlayerItem
+    private var looper: AVPlayerLooper?
+    private var currentItemObservation: NSKeyValueObservation?
+
+    /// 現在再生中のitemに紐づくvideoOutput。copyFrameはこれを読む。
+    private var videoOutput: AVPlayerItemVideoOutput?
+    /// videoOutputを付与済みのitem(付け替え判定用)
+    private weak var outputItem: AVPlayerItem?
+
+    /// YUV(420f)のままCore Imageへ渡し、RGBA変換コストを避ける(Apple公式ガイド)
+    private static let pixelBufferAttributes: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String:
+            Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+    ]
+
     init(url: URL, loop: Bool) {
-        // TODO: ENG-2 — AVURLAsset読み込み、AVPlayerItemVideoOutput追加、AVPlayerLooper構成
+        let asset = AVURLAsset(url: url)
+        templateItem = AVPlayerItem(asset: asset)
+        let queuePlayer = AVQueuePlayer()
+        player = queuePlayer
+
+        // currentItemが差し替わるたび、そのitemへvideoOutputを付け替える
+        currentItemObservation = queuePlayer.observe(\.currentItem, options: [.initial, .new]) {
+            [weak self] player, _ in
+            self?.attachOutputIfNeeded(to: player.currentItem)
+        }
+
+        if loop {
+            // AVPlayerLooperがテンプレートのコピーをキューへ供給する(シームレスループ)
+            looper = AVPlayerLooper(player: queuePlayer, templateItem: templateItem)
+        } else {
+            queuePlayer.insert(templateItem, after: nil)
+        }
+    }
+
+    /// 現在再生中のitemにまだvideoOutputが付いていなければ、新規に生成して付与する。
+    private func attachOutputIfNeeded(to item: AVPlayerItem?) {
+        guard let item, item !== outputItem else { return }
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: Self.pixelBufferAttributes)
+        item.add(output)
+        videoOutput = output
+        outputItem = item
     }
 
     func copyFrame(forHostTime hostTime: CFTimeInterval) -> CIImage? {
-        nil // TODO: ENG-2
+        guard let output = videoOutput else { return nil }
+        let itemTime = output.itemTime(forHostTime: hostTime)
+        // 新フレームがある時だけ取り出す(hostTime基準)。無ければnil→前フレーム再利用。
+        guard output.hasNewPixelBuffer(forItemTime: itemTime),
+              let pixelBuffer = output.copyPixelBuffer(forItemTime: itemTime,
+                                                       itemTimeForDisplay: nil) else {
+            return nil
+        }
+        return CIImage(cvPixelBuffer: pixelBuffer)
     }
 
-    func play() { /* TODO: ENG-2 */ }
-    func pause() { /* TODO: ENG-2 */ }
-    func seek(to seconds: Double) { /* TODO: ENG-2 */ }
+    func play() { player?.play() }
+
+    func pause() { player?.pause() }
+
+    func seek(to seconds: Double) {
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        player?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
     var volume: Float {
         get { player?.volume ?? 0 }
         set { player?.volume = newValue }
