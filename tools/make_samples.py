@@ -102,15 +102,16 @@ def warp_frames():
             col = (1.0, 0.85, 0.7) if warm[i] else (0.75, 0.85, 1.0)
             dx, dy = np.cos(ang[i]), np.sin(ang[i])
             streak = 6.0 + s * 70.0                       # 速度感のある尾
-            for j in range(5):
-                rr = dist - streak * j / 5.0
+            steps = 10                                    # 尾が点線に見えない密度
+            for j in range(steps):
+                rr = dist - streak * j / steps
                 if rr <= 0:
                     continue
                 px, py = FRONT_CX + dx * rr, FRONT_CY + dy * rr
                 if not (-40 <= px <= W + 40 and -40 <= py <= H + 40):
                     continue
                 splat(img, px, py, 3 if s > 0.5 else 2, col,
-                      bright * (1.0 - 0.16 * j))
+                      bright * (1.0 - 0.09 * j) * 0.6)
         yield img
 
 
@@ -156,12 +157,13 @@ def ocean_frames():
             + 0.04 * np.sin(2 * np.pi * (XX / 260.0 - 3 * t) + YY * 0.06)
             + 0.03 * np.sin(2 * np.pi * (YY / 90.0 - 4 * t))
         ) * (0.35 + 0.65 * yn)
-        # 床ゾーン寄りの大きなうねり(コースティック風)
+        # 床ゾーン寄りの大きなうねり(コースティック風)。
+        # 内側の変調を弱め、|sin|^2でリッジを丸めてジグザグ感を抑える。
         caustic = np.abs(
-            np.sin(2 * np.pi * (XX / 340.0 + 1 * t)
-                   + 2.4 * np.sin(2 * np.pi * (YY / 420.0 - 1 * t)))
-        ) * np.clip((YY - 700.0) / 240.0, 0, 1)
-        water_l = (ripple + 0.16 * caustic)[..., None] * np.array([0.5, 0.9, 0.85], np.float32)
+            np.sin(2 * np.pi * (XX / 430.0 + 1 * t)
+                   + 1.5 * np.sin(2 * np.pi * (YY / 460.0 - 1 * t)))
+        ) ** 2 * np.clip((YY - 700.0) / 240.0, 0, 1)
+        water_l = (ripple + 0.11 * caustic)[..., None] * np.array([0.5, 0.9, 0.85], np.float32)
 
         img = np.where(above, sky, sea + water_l) + sun_glow + sun_core
         img = img.astype(np.float32)
@@ -227,8 +229,8 @@ def firefly_frames():
             b = blink ** 3
             if b < 0.02:
                 continue
-            splat(img, px, py, 9, (0.55, 0.9, 0.35), 0.28 * b)   # ハロー
-            splat(img, px, py, 3, (0.95, 1.0, 0.6), 0.9 * b)     # コア
+            splat(img, px, py, 14, (0.55, 0.9, 0.35), 0.42 * b)  # ハロー
+            splat(img, px, py, 4, (0.95, 1.0, 0.62), 1.1 * b)    # コア
         yield img
 
 
