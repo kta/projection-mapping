@@ -25,7 +25,12 @@ struct CropEditorView: View {
             GeometryReader { geo in
                 let canvas = MeshCanvasView.letterboxRect(in: geo.size)
                 ZStack {
-                    Color.black
+                    // 周囲はライトUI、ソース映像のフレームだけ黒(MeshCanvasViewと同じ役割分担)
+                    Color(.secondarySystemBackground)
+                    Rectangle()
+                        .fill(Color.black)
+                        .frame(width: canvas.width, height: canvas.height)
+                        .position(x: canvas.midX, y: canvas.midY)
                     backgroundView(in: canvas)
                     ForEach(cropTargets()) { target in
                         cropRectView(target, canvas: canvas)

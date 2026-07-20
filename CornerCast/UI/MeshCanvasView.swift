@@ -35,7 +35,13 @@ struct MeshCanvasView: View {
         GeometryReader { geo in
             let canvasRect = Self.letterboxRect(in: geo.size)
             ZStack {
-                Color.black
+                // 周囲はライトUIに合わせ、投影フレーム(letterbox内)だけを黒にする。
+                // 黒い矩形=プロジェクターに出る絵そのもの、という対応を視覚化する。
+                Color(.secondarySystemBackground)
+                Rectangle()
+                    .fill(Color.black)
+                    .frame(width: canvasRect.width, height: canvasRect.height)
+                    .position(x: canvasRect.midX, y: canvasRect.midY)
                 // 合成プレビュー(F-OUT-4): 出力と同じFrameComposerを低解像度で回した結果。
                 // 外部ディスプレイ未接続でも、投影される絵をここで確認できる。
                 if let previewImage {
@@ -82,7 +88,7 @@ struct MeshCanvasView: View {
                     size: CGSize(width: 640, height: 360))
             }
         }
-        .background(Color.black)
+        .background(Color(.secondarySystemBackground))
     }
 
     // MARK: - レイヤー(型チェック分割のため関数化)

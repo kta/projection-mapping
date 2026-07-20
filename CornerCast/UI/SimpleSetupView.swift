@@ -30,7 +30,7 @@ struct SimpleSetupView: View {
                 .padding(.horizontal, 32)
                 .padding(.bottom, 20)
         }
-        .background(Color.black.ignoresSafeArea())
+        .background(Color.ccBackground.ignoresSafeArea())
         .onAppear {
             // 壁に映る模様(テストパターン)と画面の枠を対応づける
             viewModel.contentSource = .testPattern
@@ -49,11 +49,11 @@ struct SimpleSetupView: View {
             progressDots
             Text(stepTitle)
                 .font(.title.weight(.bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
                 .multilineTextAlignment(.center)
             Text(stepCaption)
                 .font(.body)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 560)
         }
@@ -63,7 +63,7 @@ struct SimpleSetupView: View {
         HStack(spacing: 8) {
             ForEach(0...Self.lastStep, id: \.self) { i in
                 Circle()
-                    .fill(i <= step ? Color.accentColor : Color.white.opacity(0.2))
+                    .fill(i <= step ? Color.accentColor : Color(.systemGray4))
                     .frame(width: 8, height: 8)
             }
         }
@@ -116,7 +116,7 @@ struct SimpleSetupView: View {
             Image(systemName: viewModel.displayState.isConnected
                   ? "checkmark.circle.fill" : "cable.connector.horizontal")
                 .font(.system(size: 88, weight: .light))
-                .foregroundStyle(viewModel.displayState.isConnected ? Color.green : .white.opacity(0.8))
+                .foregroundStyle(viewModel.displayState.isConnected ? Color.green : Color.ccAccent.opacity(0.7))
                 .contentTransition(.symbolEffect(.replace))
             if viewModel.displayState.isConnected {
                 Text("つながりました!")
@@ -125,7 +125,7 @@ struct SimpleSetupView: View {
             } else {
                 Text("つながると、ここに「つながりました!」と出ます")
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -134,7 +134,7 @@ struct SimpleSetupView: View {
         VStack(spacing: 20) {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 88, weight: .light))
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(Color.ccAccent.opacity(0.7))
             Button {
                 showContentPicker = true
             } label: {
@@ -162,7 +162,7 @@ struct SimpleSetupView: View {
                 .foregroundStyle(Color.green)
             Text("お部屋が映画館になりました")
                 .font(.title3)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(.primary)
         }
     }
 
@@ -200,7 +200,7 @@ struct SimpleSetupView: View {
                 onFinish()
             }
             .font(.footnote)
-            .foregroundStyle(.white.opacity(0.5))
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -248,12 +248,24 @@ private struct SimpleAdjustCanvas: View {
         GeometryReader { geo in
             let canvasRect = MeshCanvasView.letterboxRect(in: geo.size)
             ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white.opacity(0.04))
+                // 白いカードの中に「プロジェクターに映る絵」の黒フレームを置く。
+                // 黒い部分=壁に出る絵、白い部分=手元のUI、と役割が一目でわかる。
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.ccCard)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.ccCardBorder, lineWidth: 1)
+                    )
+                    .ccCardShadow()
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.black)
+                    .frame(width: canvasRect.width, height: canvasRect.height)
+                    .position(x: canvasRect.midX, y: canvasRect.midY)
                 if let previewImage {
                     Image(uiImage: previewImage)
                         .resizable()
                         .frame(width: canvasRect.width, height: canvasRect.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                         .position(x: canvasRect.midX, y: canvasRect.midY)
                         .opacity(0.9)
                 }
@@ -320,7 +332,7 @@ private struct BigHandle: View {
             Circle().fill(.white).frame(width: 28, height: 28)
             Circle().stroke(color, lineWidth: 4).frame(width: 28, height: 28)
         }
-        .shadow(color: .black.opacity(0.5), radius: 4)
+        .shadow(color: .black.opacity(0.35), radius: 4)
         .frame(width: 60, height: 60)
         .contentShape(Circle())
         .position(pos)

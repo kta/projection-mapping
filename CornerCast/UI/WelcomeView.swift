@@ -3,9 +3,10 @@ import SwiftUI
 /// ユースケース選択(F-TPL-1)。初回起動時(viewModel.needsWelcome)と
 /// ツールバー「新規」から表示する。
 ///
-/// デザイン: 黒基調のフルスクリーン。タイトル + サブタイトルの下に
-/// ProjectTemplate.allCases の3枚カードを並べる(横幅が広ければ横並び、
-/// 狭ければ縦積み)。カードタップで軽い押下スケール → apply(template:) → dismiss。
+/// デザイン(v1.6): 生成りがかった温かい白のフルスクリーン。タイトル + サブタイトルの下に
+/// ProjectTemplate.allCases の3枚カード(白カード+やわらかい影)を並べる
+/// (横幅が広ければ横並び、狭ければ縦積み)。
+/// カードタップで軽い押下スケール → apply(template:) → dismiss。
 /// 右上「閉じる」で現在のプリセットのまま抜けられる(スキップ可能)。
 struct WelcomeView: View {
     @Bindable var viewModel: MappingViewModel
@@ -17,7 +18,7 @@ struct WelcomeView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.ccBackground.ignoresSafeArea()
             if startedSimpleSetup {
                 SimpleSetupView(viewModel: viewModel) {
                     dismiss()
@@ -27,7 +28,8 @@ struct WelcomeView: View {
                 closeButton
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
+        .tint(Color.ccAccent)
     }
 
     // MARK: タイトル + カード群
@@ -45,10 +47,10 @@ struct WelcomeView: View {
         VStack(spacing: 10) {
             Text("CornerCast")
                 .font(.system(size: 44, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
             Text("どこから始めますか?")
                 .font(.title3)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -88,9 +90,9 @@ struct WelcomeView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(.secondary)
                         .frame(width: 44, height: 44)
-                        .background(.white.opacity(0.12), in: Circle())
+                        .background(Color.black.opacity(0.05), in: Circle())
                 }
                 .padding(20)
             }
@@ -102,7 +104,8 @@ struct WelcomeView: View {
 // MARK: - テンプレートカード
 
 /// 1枚ぶんのカード。大きめアイコン + displayName + caption。
-/// 押下時に軽くスケールダウンして押下感を出す(スケールは CardButtonStyle が担当)。
+/// 白カード+やわらかい影。押下時に軽くスケールダウンして押下感を出す
+/// (スケールは CardButtonStyle が担当)。
 private struct TemplateCard: View {
     let template: MappingPreset.ProjectTemplate
     let action: () -> Void
@@ -112,25 +115,26 @@ private struct TemplateCard: View {
             VStack(spacing: 16) {
                 Image(systemName: template.systemImage)
                     .font(.system(size: 52, weight: .light))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.ccAccent)
                     .frame(height: 64)
                 Text(template.displayName)
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                 Text(template.caption)
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(28)
             .frame(maxWidth: .infinity)
             .frame(minHeight: 260)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .background(Color.ccCard, in: RoundedRectangle(cornerRadius: 20))
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(.white.opacity(0.1), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.ccCardBorder, lineWidth: 1)
             )
+            .ccCardShadow()
         }
         .buttonStyle(CardButtonStyle())
     }
