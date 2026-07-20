@@ -27,6 +27,7 @@ struct ContentPickerView: View {
     var body: some View {
         NavigationStack {
             List {
+                sampleSection
                 Section("テストパターン") {
                     Button {
                         viewModel.contentSource = .testPattern
@@ -84,6 +85,35 @@ struct ContentPickerView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(errorMessage ?? "")
+            }
+        }
+    }
+
+    // MARK: - サンプル動画(F-SRC-7)
+
+    /// 同梱サンプル。自分の動画がなくてもワンタップで投影を試せる。
+    @ViewBuilder private var sampleSection: some View {
+        if !SampleVideo.available.isEmpty {
+            Section("サンプル動画(そのまま使えます)") {
+                ForEach(SampleVideo.available) { sample in
+                    Button {
+                        guard let url = sample.url else { return }
+                        viewModel.contentSource = .video(url)
+                        dismiss()
+                    } label: {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(sample.title)
+                                    .foregroundStyle(.primary)
+                                Text(sample.caption)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: sample.systemImage)
+                        }
+                    }
+                }
             }
         }
     }
