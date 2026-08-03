@@ -22,6 +22,14 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      # 同梱サンプル動画(F-SRC-7)の実体検査。解像度/尺/全フレームのデコード可否、
+      # ループ継ぎ目、デフォルトクロップ3面に絵があるかを実測する。
+      # ビルドとは独立なので、素材を差し替えたときの事故をここで止める。
+      - name: Verify sample videos
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check numpy imageio-ffmpeg
+          python3 tools/verify_samples.py
+
       - name: Install tools
         run: |
           command -v xcodegen >/dev/null || brew install xcodegen
