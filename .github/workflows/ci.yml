@@ -12,6 +12,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 同梱サンプル動画(F-SRC-7)の実体検査。解像度/尺/全フレームのデコード可否、
+  # ループ継ぎ目、デフォルトクロップ3面に絵があるかを実測する。
+  # Xcodeに依存しないので独立ジョブにし、ビルドの合否とは別の信号として出す。
+  # (バンドルに入るかどうかは CornerCastTests/SampleVideoTests.swift が見る)
+  verify-samples:
+    name: Verify sample videos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet numpy imageio-ffmpeg
+
+      - name: Verify
+        run: python3 tools/verify_samples.py
+
   build-and-test:
     name: Build & Test (iOS Simulator)
     runs-on: macos-15
@@ -21,14 +42,6 @@ jobs:
 
       - name: Show Xcode version
         run: xcodebuild -version
-
-      # 同梱サンプル動画(F-SRC-7)の実体検査。解像度/尺/全フレームのデコード可否、
-      # ループ継ぎ目、デフォルトクロップ3面に絵があるかを実測する。
-      # ビルドとは独立なので、素材を差し替えたときの事故をここで止める。
-      - name: Verify sample videos
-        run: |
-          python3 -m pip install --quiet --disable-pip-version-check numpy imageio-ffmpeg
-          python3 tools/verify_samples.py
 
       - name: Install tools
         run: |
