@@ -30,7 +30,7 @@ struct ContentPickerView: View {
                 sampleSection
                 Section("テストパターン") {
                     Button {
-                        viewModel.contentSource = .testPattern
+                        viewModel.selectContent(.testPattern)
                         dismiss()
                     } label: {
                         Label("テストパターンを表示", systemImage: "grid")
@@ -98,7 +98,7 @@ struct ContentPickerView: View {
                 ForEach(SampleVideo.available) { sample in
                     Button {
                         guard let url = sample.url else { return }
-                        viewModel.contentSource = .video(url)
+                        viewModel.selectContent(.video(url))
                         dismiss()
                     } label: {
                         Label {
@@ -136,8 +136,7 @@ struct ContentPickerView: View {
     private func bakeRow(_ record: BakeRecord) -> some View {
         Button {
             // 結線契約(docs/05 §3-7): ベイク再生はUI側がcontentSourceとoutputModeを設定する
-            viewModel.contentSource = .bakedVideo(record.fileURL)
-            viewModel.outputMode = .bakedPlayback
+            viewModel.selectContent(.bakedVideo(record.fileURL))
             dismiss()
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -173,7 +172,7 @@ struct ContentPickerView: View {
             do {
                 if let movie = try await item.loadTransferable(type: PickedMovie.self) {
                     await MainActor.run {
-                        viewModel.contentSource = .video(movie.url)
+                        viewModel.selectContent(.video(movie.url))
                         isLoading = false
                         dismiss()
                     }
@@ -195,7 +194,7 @@ struct ContentPickerView: View {
                     let dest = Self.tmpURL(ext: ext)
                     try data.write(to: dest)
                     await MainActor.run {
-                        viewModel.contentSource = .image(dest)
+                        viewModel.selectContent(.image(dest))
                         isLoading = false
                         dismiss()
                     }
@@ -227,9 +226,9 @@ struct ContentPickerView: View {
                 try FileManager.default.copyItem(at: src, to: dest)
                 let type = UTType(filenameExtension: src.pathExtension)
                 if let type, type.conforms(to: .movie) {
-                    viewModel.contentSource = .video(dest)
+                    viewModel.selectContent(.video(dest))
                 } else {
-                    viewModel.contentSource = .image(dest)
+                    viewModel.selectContent(.image(dest))
                 }
                 dismiss()
             } catch {

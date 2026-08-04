@@ -88,7 +88,7 @@ struct EditorView: View {
                 Label("コンテンツ", systemImage: "photo.on.rectangle")
             }
             Button {
-                viewModel.contentSource = .testPattern
+                viewModel.selectContent(.testPattern)
             } label: {
                 Label("テストパターン", systemImage: "grid")
             }

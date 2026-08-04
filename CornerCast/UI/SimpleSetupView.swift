@@ -33,7 +33,7 @@ struct SimpleSetupView: View {
         .background(Color.ccBackground.ignoresSafeArea())
         .onAppear {
             // 壁に映る模様(テストパターン)と画面の枠を対応づける
-            viewModel.contentSource = .testPattern
+            viewModel.selectContent(.testPattern)
             syncSelection()
         }
         .onChange(of: step) { _, _ in syncSelection() }

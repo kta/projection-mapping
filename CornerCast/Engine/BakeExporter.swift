@@ -105,8 +105,16 @@ final class BakeExporter {
         }
         let outputURL = bakesDir.appendingPathComponent("\(recordID.uuidString).mp4")
 
-        // 書き出し前に空き容量を確認する(F-BAKE-4)。
-        try Self.checkFreeSpace(for: sourceURL)
+        // 書き出し前に空き容量を確認する(F-BAKE-4)。出力解像度を必ず渡すこと。
+        try await Self.checkFreeSpace(for: sourceURL, outputSize: outputSize)
+
+        // 途中で失敗・キャンセルしたら書きかけのファイルを残さない。
+        // Documents/Bakes/ 直下に書くため、残骸は index.json に載らず
+        // UIからは見えないまま容量だけを食い続ける(アプリ削除以外に回収路がない)。
+        var completed = false
+        defer {
+            if !completed { try? FileManager.default.removeItem(at: outputURL) }
+        }
 
         let asset = AVURLAsset(url: sourceURL)
 
@@ -139,12 +147,21 @@ final class BakeExporter {
         // 進捗をポーリングして通知する(F-BAKE-4)。
         // NOTE: iOS 18で導入された states(updateInterval:) / export(to:as:) は
         //       デプロイ先(iOS 17)で使えないため、従来型のprogressポーリングを用いる。
+        //
+        // 状態判定は「終端状態で抜ける」形にすること。以前は
+        // `guard status == .waiting || .exporting else { break }` だったため、
+        // exportAsynchronously を呼ぶ前の 1 周目に .unknown を観測すると
+        // その場で break し、進捗バーが 0% のまま完了までフリーズしていた。
         let progressPoller = Task { [weak self, weak export] in
             while !Task.isCancelled {
                 guard let export else { break }
                 self?.progressHandler?(Double(export.progress))
-                // .waiting / .exporting の間だけ継続。完了・失敗・キャンセルで抜ける。
-                guard export.status == .waiting || export.status == .exporting else { break }
+                switch export.status {
+                case .completed, .failed, .cancelled:
+                    return
+                default:
+                    break   // .unknown / .waiting / .exporting は継続
+                }
                 try? await Task.sleep(nanoseconds: 250_000_000) // 0.25s
             }
         }
@@ -173,6 +190,7 @@ final class BakeExporter {
         // 完了時に確実に1.0を通知しておく(ポーリングが取りこぼす可能性への保険)。
         progressPoller.cancel()
         self.progressHandler?(1.0)
+        completed = true
 
         return BakeRecord(
             id: recordID,
@@ -192,12 +210,29 @@ final class BakeExporter {
 
     // MARK: - 空き容量チェック(F-BAKE-4)
 
-    /// ソースサイズ×1.5を見積もりとし、Documentsボリュームの空きと比較する。
-    /// 見積もりは仮の目安(設計書TODO準拠)。実サイズは再エンコード結果に依存する。
-    private static func checkFreeSpace(for sourceURL: URL) throws {
-        let sourceBytes = (try? sourceURL.resourceValues(
-            forKeys: [.fileSizeKey]).fileSize) ?? 0
-        let estimated = Int64(Double(sourceBytes) * 1.5)
+    /// 出力解像度 × 尺 × 想定ビットレート で見積もり、Documentsボリュームの空きと比較する。
+    ///
+    /// 以前はソースサイズ×1.5だけで見ており、**出力解像度を完全に無視していた**。
+    /// 1080pでも4Kでも同じ見積もりになるため、4K書き出しでは実測の1/2〜1/3しか見ておらず、
+    /// F-BAKE-4 が警告を出す場合ですら表示される数値が誤っていた。
+    private static func checkFreeSpace(for sourceURL: URL, outputSize: CGSize) async throws {
+        let asset = AVURLAsset(url: sourceURL)
+        let seconds = (try? await asset.load(.duration).seconds) ?? 0
+        let duration = seconds.isFinite && seconds > 0 ? seconds : 0
+
+        let estimated: Int64
+        if duration > 0 {
+            // HEVC の実効ビットレート目安: 画素数に比例させる(1080p ≒ 12Mbps)。
+            // 1920*1080 = 2,073,600 px に対し 12Mbps → 約 5.79 bps/px。
+            let pixels = max(outputSize.width * outputSize.height, 1)
+            let bitsPerSecond = Double(pixels) * 5.79
+            // 安全率1.3(可変ビットレートの山と音声トラックぶん)
+            estimated = Int64(bitsPerSecond * duration / 8.0 * 1.3)
+        } else {
+            // 尺が取れないときは従来どおりソースサイズから概算する
+            let sourceBytes = (try? sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            estimated = Int64(Double(sourceBytes) * 1.5)
+        }
 
         guard let docs = FileManager.default.urls(
             for: .documentDirectory, in: .userDomainMask).first else {
@@ -236,13 +271,28 @@ final class BakeStore {
         self.fileManager = fileManager
     }
 
+    /// 索引が読めなかったことを表す。`list()` の「空」と区別するために使う。
+    struct IndexUnreadable: Error {}
+
     func list() -> [BakeRecord] {
+        (try? loadRecords()) ?? []
+    }
+
+    /// 索引を読む。**「空」と「読めない」を区別すること。**
+    /// index.json は単一のJSON配列なので、1レコードの不整合でデコード全体が落ちる。
+    /// これを `?? []` で潰したまま add/delete の read-modify-write を続けると、
+    /// 次の書き込みで**全レコードが消え**、実体のmp4だけがUIから見えないゴミとして残る。
+    private func loadRecords() throws -> [BakeRecord] {
         guard let dir = BakePaths.bakesDirectoryURL(fileManager: fileManager),
-              let url = BakePaths.indexURL(fileManager: fileManager),
-              let data = try? Data(contentsOf: url) else {
-            return []
+              let url = BakePaths.indexURL(fileManager: fileManager) else {
+            throw BakeError.storageUnavailable
         }
-        let records = (try? decoder.decode([BakeRecord].self, from: data)) ?? []
+        guard let data = try? Data(contentsOf: url) else {
+            return []   // 索引がまだ無い = 空。これは正常。
+        }
+        guard let records = try? decoder.decode([BakeRecord].self, from: data) else {
+            throw IndexUnreadable()
+        }
         // アプリのサンドボックス絶対パスは再インストール等でコンテナUUIDが変わり得るため、
         // 保存済みfileURLをそのまま信頼せず、現在のBakesディレクトリ+ファイル名で再構成する(N-REL-1)。
         return records.map { record in
@@ -252,23 +302,71 @@ final class BakeStore {
         }
     }
 
-    /// レコードを追加(同一IDは置き換え)。
+    /// レコードを追加(同一IDは置き換え)。索引が読めない場合は退避して作り直す。
     func add(_ record: BakeRecord) throws {
-        var records = list()
+        var records = try recordsForMutation()
         records.removeAll { $0.id == record.id }
         records.append(record)
         try writeIndex(records)
     }
 
     /// レコードと実体ファイルを削除する。
+    /// **索引を先に書いてから実体を消すこと。** 逆順だと writeIndex が失敗したときに
+    /// 「実体を失ったレコードが索引に残る」状態になり、再生時に破綻する。
     func delete(id: UUID) throws {
-        var records = list()
-        if let index = records.firstIndex(where: { $0.id == id }) {
-            let removed = records.remove(at: index)
-            // 動画本体も削除(存在しなくてもエラーにしない)。
+        var records = try recordsForMutation()
+        let removed = records.first { $0.id == id }
+        records.removeAll { $0.id == id }
+        try writeIndex(records)
+        if let removed {
             try? fileManager.removeItem(at: removed.fileURL)
         }
-        try writeIndex(records)
+    }
+
+    /// 書き換え前の索引読み出し。読めない場合は破損ファイルを退避したうえで、
+    /// Bakes/ の実走査から索引を復元する。全件を黙って捨てない。
+    private func recordsForMutation() throws -> [BakeRecord] {
+        do {
+            return try loadRecords()
+        } catch is IndexUnreadable {
+            try? quarantineCorruptIndex()
+            return rebuildIndexFromDisk()
+        }
+    }
+
+    /// 壊れた索引を index.corrupt-<時刻>.json へ退避する(上書きで失わないため)。
+    private func quarantineCorruptIndex() throws {
+        guard let url = BakePaths.indexURL(fileManager: fileManager) else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let backup = url.deletingLastPathComponent()
+            .appendingPathComponent("index.corrupt-\(stamp).json")
+        try? fileManager.moveItem(at: url, to: backup)
+    }
+
+    /// Bakes/ 直下の mp4 を実走査して索引を組み直す。
+    /// fingerprint は復元できないので、必ず「再書き出しが必要」と判定される値を入れる。
+    private func rebuildIndexFromDisk() -> [BakeRecord] {
+        guard let dir = BakePaths.bakesDirectoryURL(fileManager: fileManager),
+              let urls = try? fileManager.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return []
+        }
+        return urls
+            .filter { $0.pathExtension.lowercased() == "mp4" }
+            .map { url in
+                let created = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? Date()
+                return BakeRecord(
+                    id: UUID(uuidString: url.deletingPathExtension().lastPathComponent) ?? UUID(),
+                    sourceFileName: url.lastPathComponent,
+                    fileURL: url,
+                    presetID: UUID(),
+                    calibrationFingerprint: "recovered",
+                    createdAt: created,
+                    outputWidth: 0,
+                    outputHeight: 0)
+            }
     }
 
     /// 生成時プリセットと現在のプリセットのfingerprint比較(F-BAKE-3の「再書き出しが必要」判定)。

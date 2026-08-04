@@ -66,7 +66,17 @@ final class OutputHostViewController: UIViewController {
         metalLayer.backgroundColor = UIColor.black.cgColor
         view.layer.addSublayer(metalLayer)
 
-        playerLayer.videoGravity = .resizeAspect
+        // .resize(非等方にフレーム全面へ伸ばす)であること。**.resizeAspect にしてはいけない。**
+        //
+        // リアルタイム経路は canvasSize = パネルのネイティブ解像度で描き、正規化座標(0,0)-(1,1)は
+        // パネル全面に一致する(CoordinateMapper.ciPixel の軸別スケール)。
+        // 一方ベイク動画は 1080p / 4K の16:9固定で書き出される。ここを .resizeAspect にすると
+        // 非16:9パネル(WUXGA 1920×1200 など)ではレターボックスが入り、
+        // 長時間運用の既定モードへ切り替えた瞬間に12点キャリブレーションが
+        // パネル高の5%(4:3機なら12.5%)ずれる。しかもベイク再生中はテストパターンを出せないので
+        // 合わせ直すこともできない。.resize なら異方アフィンとワープのホモグラフィが合成され、
+        // 4点対応が保存されるためリアルタイムと幾何が厳密に一致する。
+        playerLayer.videoGravity = .resize
         playerLayer.backgroundColor = UIColor.black.cgColor
         playerLayer.isHidden = true
         view.layer.addSublayer(playerLayer)

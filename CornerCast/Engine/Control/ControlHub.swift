@@ -19,7 +19,10 @@ final class ControlHub {
     private var oscServer: OSCServer?
     private var midiController: MIDIController?
 
+    /// 実際にポートを取れて待ち受けているか。**設定の ON/OFF ではない。**
     private(set) var isRunning = false
+    /// 起動に失敗した理由(UIに表示する)。成功時・停止時は nil。
+    private(set) var lastErrorMessage: String?
 
     private enum Keys {
         static let oscEnabled = "control.osc.enabled"
@@ -51,6 +54,13 @@ final class ControlHub {
 
     // MARK: - ライフサイクル
 
+    /// 保存済み設定が有効なら起動する(アプリ起動時に一度だけ呼ぶ)。
+    /// 無効なら何もしない。`start()` と違い、設定OFFのときに無駄な停止処理をしない。
+    func startIfEnabled() {
+        guard oscEnabled || midiEnabled else { return }
+        start()
+    }
+
     /// 設定を読み、有効な制御を起動する。再入時は先に停止するため冪等。
     func start() {
         stop()
@@ -64,11 +74,19 @@ final class ControlHub {
                     self?.apply(osc: message)
                 }
             }
+            // 実際にポートを取れたかは非同期にしか分からない。UIの表示はこの結果に従う。
+            server.stateHandler = { [weak self] ready, message in
+                Task { @MainActor in
+                    self?.isRunning = ready
+                    self?.lastErrorMessage = ready ? nil : message
+                }
+            }
             do {
                 try server.start()
                 oscServer = server
             } catch {
                 oscServer = nil
+                lastErrorMessage = error.localizedDescription
             }
         }
 
@@ -89,8 +107,9 @@ final class ControlHub {
             }
         }
 
-        // MIDIは未実装スタブのため、稼働表示はOSCサーバの起動可否に紐付ける。
-        isRunning = oscServer != nil
+        // isRunning は stateHandler が .ready を通知した時点で true になる。
+        // ここでは「起動を試みた」に留め、まだ待ち受けできていない状態を true にしない。
+        if oscServer == nil { isRunning = false }
     }
 
     /// 全停止。冪等。
@@ -100,6 +119,7 @@ final class ControlHub {
         midiController?.stop()
         midiController = nil
         isRunning = false
+        lastErrorMessage = nil
     }
 
     /// 設定を保存して再起動する。
@@ -150,14 +170,14 @@ final class ControlHub {
             viewModel.preset.surfaces[surface]?.feather = Double(Self.clamp(v, 0, 0.3))
 
         case "play":
-            viewModel.activeVideoSource?.play()
+            viewModel.playback?.play()
 
         case "pause":
-            viewModel.activeVideoSource?.pause()
+            viewModel.playback?.pause()
 
         case "mode":
             // i (0=realtime, 1=baked)
-            guard let v = floats.first else { return }
+            guard let v = floats.first, v.isFinite else { return }
             viewModel.outputMode = Int(v.rounded()) == 1 ? .bakedPlayback : .realtime
 
         default:
@@ -195,8 +215,8 @@ final class ControlHub {
                 return
             }
         case .noteOn(let note):
-            if note == 60 { viewModel.activeVideoSource?.play() }
-            else if note == 61 { viewModel.activeVideoSource?.pause() }
+            if note == 60 { viewModel.playback?.play() }
+            else if note == 61 { viewModel.playback?.pause() }
         }
     }
 
@@ -217,8 +237,15 @@ final class ControlHub {
         }
     }
 
+    /// 非有限値に安全なクランプ。
+    ///
+    /// Swiftの総称 min/max は `max(x,y) = y >= x ? y : x` の形なので、x が NaN だと
+    /// 比較が両方 false になり NaN が素通りする。NaN が preset に入ると
+    /// JSONEncoder.encode が throw し、以後の自動保存が無言で失敗し続ける。
+    /// OSC は同一LAN上の誰でも送れるので、ここは必ず止める。
     private static func clamp(_ v: Float, _ lo: Float, _ hi: Float) -> Float {
-        min(max(v, lo), hi)
+        guard v.isFinite else { return lo }
+        return min(max(v, lo), hi)
     }
 }
 
@@ -234,11 +261,18 @@ final class OSCServer {
 
     private let port: NWEndpoint.Port
     private var listener: NWListener?
+    /// 受理済み接続。保持しないと ARC で解放され、以後データグラムを受け取れなくなる。
+    private var connections: [NWConnection] = []
     private let queue = DispatchQueue(label: "com.cornercast.osc.server")
 
     init(port: UInt16) {
         self.port = NWEndpoint.Port(rawValue: port) ?? .init(integerLiteral: 8000)
     }
+
+    /// 待ち受け状態の変化を通知する。`NWListener.start` は同期的には失敗しないため、
+    /// ポートが既に使われている等の実際のバインド失敗はここでしか観測できない。
+    /// これが無いと、ポートを取れていなくてもUIは緑の「OSC受信中」を表示し続ける。
+    var stateHandler: (@Sendable (Bool, String?) -> Void)?
 
     func start() throws {
         stop()
@@ -246,13 +280,41 @@ final class OSCServer {
         listener.newConnectionHandler = { [weak self] connection in
             self?.setup(connection)
         }
+        listener.stateUpdateHandler = { [stateHandler] state in
+            switch state {
+            case .ready:
+                stateHandler?(true, nil)
+            case .failed(let error):
+                stateHandler?(false, error.localizedDescription)
+            case .cancelled:
+                stateHandler?(false, nil)
+            default:
+                break
+            }
+        }
         listener.start(queue: queue)
         self.listener = listener
     }
 
     private func setup(_ connection: NWConnection) {
+        // 受理した接続は保持し、切れたら破棄する。保持しないと参照が切れて受信が止まる。
+        connections.append(connection)
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .cancelled, .failed:
+                self?.remove(connection)
+            default:
+                break
+            }
+        }
         connection.start(queue: queue)
         receive(on: connection)
+    }
+
+    private func remove(_ connection: NWConnection) {
+        queue.async { [weak self] in
+            self?.connections.removeAll { $0 === connection }
+        }
     }
 
     /// UDPデータグラム単位で受信し、パース成功時にハンドラへ渡す。
@@ -271,8 +333,12 @@ final class OSCServer {
 
     /// 冪等な停止。
     func stop() {
+        listener?.stateUpdateHandler = nil
         listener?.cancel()
         listener = nil
+        let toCancel = connections
+        connections = []
+        queue.async { toCancel.forEach { $0.cancel() } }
     }
 }
 
@@ -299,7 +365,12 @@ struct OSCMessage: Equatable {
         }
         guard typeTags.hasPrefix(",") else { return nil }
 
-        // 3. 引数(ビッグエンディアン、各4バイト)
+        // 3. 引数(ビッグエンディアン)
+        //
+        // **未対応の型タグでもオフセットは必ず進めること。** 以前は `continue` で
+        // オフセットを据え置いたまま次のタグへ進んでいたため、例えば ",sff" のような
+        // 正当なパケットで文字列の中身を float として読み、頂点座標が別の値に化けていた。
+        // 長さの分からない型に当たったら、誤った値を適用するより落とす方が安全。
         var floats: [Float] = []
         var offset = afterTags
         for tag in typeTags.dropFirst() {
@@ -312,9 +383,30 @@ struct OSCMessage: Equatable {
                 guard let bits = readUInt32BE(bytes, offset) else { return nil }
                 floats.append(Float(Int32(bitPattern: bits)))
                 offset += 4
-            default:
-                // 未対応型タグはスキップ(引数長が不明なため読み飛ばさず無視する)
+            case "T", "F", "N", "I":
+                // 引数を持たない型タグ(true/false/nil/infinitum)。オフセットは動かない。
                 continue
+            case "c", "r", "m":
+                // char / RGBA / MIDIメッセージ。いずれも4バイト固定。
+                guard offset + 4 <= bytes.count else { return nil }
+                offset += 4
+            case "h", "d", "t":
+                // int64 / float64 / timetag。いずれも8バイト固定。
+                guard offset + 8 <= bytes.count else { return nil }
+                offset += 8
+            case "s", "S":
+                // OSC-string(null終端・4バイト境界パディング)
+                guard let (_, next) = readOSCString(bytes, offset) else { return nil }
+                offset = next
+            case "b":
+                // blob: int32のサイズ + 実体(4バイト境界パディング)
+                guard let size = readUInt32BE(bytes, offset) else { return nil }
+                let padded = Int((size + 3) / 4) * 4
+                offset += 4 + padded
+                guard offset <= bytes.count else { return nil }
+            default:
+                // 長さの分からない型。ここから先のオフセットは信用できない。
+                return nil
             }
         }
         return OSCMessage(address: address, floats: floats)

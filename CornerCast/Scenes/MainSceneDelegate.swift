@@ -23,12 +23,17 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
     }
 
-    // 投影中の画面消灯防止(N-THERM-2)。メインシーンのアクティブ状態に連動させる。
-    func sceneDidBecomeActive(_ scene: UIScene) {
-        UIApplication.shared.isIdleTimerDisabled = true
+    // 画面消灯防止(N-THERM-2)は「投影中かどうか」で決まるため
+    // ExternalDisplayManager の接続/切断に紐付けてある。ここでは触らないこと。
+    // シーンのアクティブ状態に紐付けると、Split View で他アプリに触れただけで
+    // 抑止が外れ、投影中でも自動ロックが復活してしまう。
+
+    // フォアグラウンド復帰時の再生・出力状態の復元(N-REL-1)
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        AppServices.shared.playback.sceneDidEnterBackground()
     }
 
-    func sceneWillResignActive(_ scene: UIScene) {
-        UIApplication.shared.isIdleTimerDisabled = false
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        AppServices.shared.playback.sceneWillEnterForeground()
     }
 }

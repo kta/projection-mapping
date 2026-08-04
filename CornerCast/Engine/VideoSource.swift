@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreImage
+import os
 
 /// 動画/静止画ソースの抽象(F-SRC-1〜4)。OutputRendererが毎フレーム currentFrame() を呼ぶ。
 protocol FrameSource: AnyObject {
@@ -33,11 +34,27 @@ final class VideoSource: FrameSource {
             Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
     ]
 
+    /// 向き補正(F-SRC-1)。iPhoneの縦撮り等は preferredTransform に回転が入っており、
+    /// これを適用しないと実出力だけが横倒しになる。プレビュー側は
+    /// AVAssetImageGenerator.appliesPreferredTrackTransform で既に補正済みなので、
+    /// ここを入れないとプレビューと投影で向きが食い違う。
+    /// 非同期で読み込むため、確定するまでは identity(無補正)。
+    /// self を跨がずロック(Sendable)だけをTaskへ渡し、スレッド越しの共有を安全にする。
+    private let orientation = OSAllocatedUnfairLock<CGAffineTransform>(initialState: .identity)
+
     init(url: URL, loop: Bool) {
         let asset = AVURLAsset(url: url)
         templateItem = AVPlayerItem(asset: asset)
         let queuePlayer = AVQueuePlayer()
         player = queuePlayer
+
+        // preferredTransform の読み込みはI/Oを伴うので非同期で行う(再生開始はブロックしない)
+        let orientation = self.orientation
+        Task {
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let transform = try? await track.load(.preferredTransform) else { return }
+            orientation.withLock { $0 = transform }
+        }
 
         // currentItemが差し替わるたび、そのitemへvideoOutputを付け替える
         currentItemObservation = queuePlayer.observe(\.currentItem, options: [.initial, .new]) {
@@ -71,7 +88,20 @@ final class VideoSource: FrameSource {
                                                        itemTimeForDisplay: nil) else {
             return nil
         }
-        return CIImage(cvPixelBuffer: pixelBuffer)
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        return Self.applyingOrientation(orientation.withLock { $0 }, to: image)
+    }
+
+    /// preferredTransform を CIImage へ適用し、原点を (0,0) へ戻す。
+    /// CIImage は左下原点なので、回転後に extent.origin が負になる。そのまま合成へ渡すと
+    /// CoordinateMapper.ciRect が想定する「extent基準の正規化」がずれるため、必ず正規化する。
+    static func applyingOrientation(_ transform: CGAffineTransform, to image: CIImage) -> CIImage {
+        guard !transform.isIdentity else { return image }
+        let rotated = image.transformed(by: transform)
+        let e = rotated.extent
+        guard e.origin != .zero else { return rotated }
+        return rotated.transformed(by: CGAffineTransform(translationX: -e.origin.x,
+                                                         y: -e.origin.y))
     }
 
     func play() { player?.play() }

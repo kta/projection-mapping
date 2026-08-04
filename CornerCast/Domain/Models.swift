@@ -65,8 +65,19 @@ struct Quad: Codable, Equatable, Sendable {
     }
 
     /// 0-1にクランプした値を返す(F-UI-1: 点はキャンバス外へ逃げない)
+    ///
+    /// 非有限値(NaN/±Inf)は0へ倒す。Swiftの総称 min/max は
+    /// `max(x,y) = y >= x ? y : x` の形なので x が NaN だと比較が両方 false になり
+    /// NaN がそのまま素通りする。NaN が preset に入ると JSONEncoder.encode が throw し、
+    /// 以後の自動保存が無言で失敗し続けるため、ここで必ず止める。
     static func clamped(_ p: CGPoint) -> CGPoint {
-        CGPoint(x: min(max(p.x, 0), 1), y: min(max(p.y, 0), 1))
+        CGPoint(x: clamp01(p.x), y: clamp01(p.y))
+    }
+
+    /// 非有限値に安全な 0-1 クランプ
+    static func clamp01(_ v: CGFloat) -> CGFloat {
+        guard v.isFinite else { return 0 }
+        return min(max(v, 0), 1)
     }
 
     /// 面の初期配置。canvas内の指定矩形(正規化)に軸平行に置く。
@@ -96,24 +107,69 @@ struct WarpMesh: Codable, Equatable, Sendable {
     func point(row: Int, col: Int) -> CGPoint { points[row * cols + col] }
     func index(row: Int, col: Int) -> Int { row * cols + col }
 
-    /// 既存の4点quadから双一次補間でメッシュを初期化する(有効化時の初期状態)
+    /// 既存の4点quadからメッシュを初期化する(有効化時の初期状態)。
+    ///
+    /// **射影変換(ホモグラフィ)で補間すること。** 4点補正の実体は
+    /// `CIPerspectiveTransform` = ホモグラフィなので、内部の格子点も同じ写像で置かないと
+    /// 「メッシュを有効にしただけ」で調整済みの投影が動いてしまう。
+    /// 以前は双一次補間だったため、パースの付いた面で最大3%強(1080p横換算で数十px)ずれていた。
+    /// ホモグラフィなら4隅はもちろん内部の全格子点が単一quadのワープと厳密に一致する。
     static func fromQuad(_ q: Quad, rows: Int = 4, cols: Int = 4) -> WarpMesh {
+        guard rows > 1, cols > 1 else {
+            return WarpMesh(rows: max(rows, 2), cols: max(cols, 2),
+                            points: Array(repeating: q.topLeft, count: max(rows, 2) * max(cols, 2)))
+        }
+        let h = UnitSquareHomography(quad: q)
         var pts: [CGPoint] = []
         pts.reserveCapacity(rows * cols)
         for r in 0..<rows {
             let v = CGFloat(r) / CGFloat(rows - 1)
-            let left = Self.lerp(q.topLeft, q.bottomLeft, v)
-            let right = Self.lerp(q.topRight, q.bottomRight, v)
             for c in 0..<cols {
                 let u = CGFloat(c) / CGFloat(cols - 1)
-                pts.append(Self.lerp(left, right, u))
+                pts.append(Quad.clamped(h.map(u: u, v: v)))
             }
         }
         return WarpMesh(rows: rows, cols: cols, points: pts)
     }
+}
 
-    private static func lerp(_ a: CGPoint, _ b: CGPoint, _ t: CGFloat) -> CGPoint {
-        CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+/// 単位正方形 (0,0)-(1,1) から任意の四角形への射影変換。
+/// (u,v) = (0,0)→topLeft / (1,0)→topRight / (1,1)→bottomRight / (0,1)→bottomLeft。
+/// Heckbert "Fundamentals of Texture Mapping and Image Warping" の閉形式解。
+struct UnitSquareHomography {
+    private let a, b, c, d, e, f, g, h: CGFloat
+
+    init(quad q: Quad) {
+        let (x0, y0) = (q.topLeft.x, q.topLeft.y)
+        let (x1, y1) = (q.topRight.x, q.topRight.y)
+        let (x2, y2) = (q.bottomRight.x, q.bottomRight.y)
+        let (x3, y3) = (q.bottomLeft.x, q.bottomLeft.y)
+
+        let sx = x0 - x1 + x2 - x3
+        let sy = y0 - y1 + y2 - y3
+        let dx1 = x1 - x2, dx2 = x3 - x2
+        let dy1 = y1 - y2, dy2 = y3 - y2
+        let den = dx1 * dy2 - dy1 * dx2
+
+        // 平行四辺形(sx=sy=0)、および退化配置(den≈0)はアフィンに縮退させる。
+        // 退化quadでも NaN/Inf を作らないことを優先する(F-WARP-4: 乱れは許容、破綻は不可)。
+        if (abs(sx) < 1e-12 && abs(sy) < 1e-12) || abs(den) < 1e-12 {
+            (self.a, self.b, self.c) = (x1 - x0, x3 - x0, x0)
+            (self.d, self.e, self.f) = (y1 - y0, y3 - y0, y0)
+            (self.g, self.h) = (0, 0)
+        } else {
+            let g = (sx * dy2 - sy * dx2) / den
+            let h = (dx1 * sy - dy1 * sx) / den
+            (self.a, self.b, self.c) = (x1 - x0 + g * x1, x3 - x0 + h * x3, x0)
+            (self.d, self.e, self.f) = (y1 - y0 + g * y1, y3 - y0 + h * y3, y0)
+            (self.g, self.h) = (g, h)
+        }
+    }
+
+    func map(u: CGFloat, v: CGFloat) -> CGPoint {
+        let w = g * u + h * v + 1
+        guard abs(w) > 1e-12 else { return CGPoint(x: c, y: f) }
+        return CGPoint(x: (a * u + b * v + c) / w, y: (d * u + e * v + f) / w)
     }
 }
 
@@ -190,7 +246,8 @@ struct ExtraSurface: Codable, Equatable, Identifiable, Sendable {
 
 /// 頂点リンク(F-WARP-5): aとbの頂点は常に同一座標に保つ
 struct CornerLink: Codable, Equatable, Identifiable, Sendable {
-    struct CornerRef: Codable, Equatable, Sendable {
+    /// Hashable なのは resolveLinks が推移閉包を取るのに訪問済み集合を使うため
+    struct CornerRef: Codable, Equatable, Hashable, Sendable {
         var surface: Surface
         var corner: Quad.Corner
     }
@@ -382,6 +439,201 @@ struct MappingPreset: Codable, Equatable, Identifiable, Sendable {
                        b: .init(surface: .floor, corner: .topRight), enabled: false),
         ]
         return MappingPreset(surfaces: surfaces, links: links)
+    }
+
+    // MARK: - 入力の正規化(全デコード経路の唯一の関門)
+
+    /// 値域・件数・有限性を強制した複製を返す。
+    ///
+    /// 外から来たJSON(F-PRESET-3の読み込み、共有されたプリセット、他ツールの出力)は
+    /// 一切信用できない。`Decodable` は `decodeIfPresent` で既定値を埋めるだけで値域を見ないため、
+    /// `gamma: 0` のような値がそのまま合成へ流れ、面が真っ白になったり消えたりする。
+    /// しかも `Slider(value:in:)` はレンジ外の値をつまみ位置として端に丸めて描くだけなので、
+    /// 画面上は正常に見えたままユーザーが直せない。さらに `preset` の didSet で
+    /// lastUsed.json へ焼き付くため、再起動しても直らない。
+    ///
+    /// **デコードするすべての経路(PresetStore・JSON読み込み)は必ずここを通すこと。**
+    /// 何か調整した場合は `changed` が true になるので、呼び出し側でユーザーに通知できる。
+    func sanitized() -> (preset: MappingPreset, changed: Bool) {
+        var p = self
+        var changed = false
+
+        func note(_ condition: Bool) { if condition { changed = true } }
+
+        p.schemaVersion = Self.currentSchemaVersion
+        note(schemaVersion != Self.currentSchemaVersion)
+
+        if p.name.isEmpty { p.name = "名称未設定"; changed = true }
+        if p.name.count > Limits.nameLength {
+            p.name = String(p.name.prefix(Limits.nameLength)); changed = true
+        }
+
+        let volume = Self.clamp(p.volume, 0, 1, default: 1)
+        note(volume != p.volume); p.volume = volume
+
+        for key in p.surfaces.keys {
+            guard let c = p.surfaces[key] else { continue }
+            let s = c.sanitized()
+            note(s.changed); p.surfaces[key] = s.config
+        }
+
+        var extras = p.extras
+        if extras.count > Limits.surfaceCount {
+            extras = Array(extras.prefix(Limits.surfaceCount)); changed = true
+        }
+        for i in extras.indices {
+            let s = extras[i].config.sanitized()
+            note(s.changed); extras[i].config = s.config
+            if extras[i].name.count > Limits.nameLength {
+                extras[i].name = String(extras[i].name.prefix(Limits.nameLength)); changed = true
+            }
+        }
+        p.extras = extras
+
+        var masks = p.maskShapes
+        if masks.count > Limits.maskCount {
+            masks = Array(masks.prefix(Limits.maskCount)); changed = true
+        }
+        for i in masks.indices {
+            let q = masks[i].quad.sanitized()
+            note(q.changed); masks[i].quad = q.quad
+        }
+        p.maskShapes = masks
+
+        if p.links.count > Limits.linkCount {
+            p.links = Array(p.links.prefix(Limits.linkCount)); changed = true
+        }
+
+        let fx = p.effectSettings.sanitized()
+        note(fx.changed); p.effectSettings = fx.settings
+
+        if !p.updatedAt.timeIntervalSince1970.isFinite {
+            p.updatedAt = .distantPast; changed = true
+        }
+
+        return (p, changed)
+    }
+
+    /// 正規化で使う上限。UIから増やす経路は1タップ1件なので実質の上限だが、
+    /// デコード経路には何も無いため、ここで頭打ちにする。
+    enum Limits {
+        static let surfaceCount = 64
+        static let maskCount = 64
+        static let linkCount = 64
+        static let nameLength = 200
+        static let meshDimension = 16
+    }
+
+    /// 非有限値に安全なクランプ。NaN/±Inf は `default` へ倒す。
+    static func clamp(_ v: Double, _ lo: Double, _ hi: Double, default fallback: Double) -> Double {
+        guard v.isFinite else { return fallback }
+        return Swift.min(Swift.max(v, lo), hi)
+    }
+}
+
+extension Quad {
+    /// 全頂点を有限かつ0-1へ収めた複製を返す
+    func sanitized() -> (quad: Quad, changed: Bool) {
+        var q = self
+        var changed = false
+        for c in Corner.allCases {
+            let p = Quad.clamped(q[c])
+            if p != q[c] { changed = true }
+            q[c] = p
+        }
+        return (q, changed)
+    }
+}
+
+extension SurfaceConfig {
+    /// 値域・有限性を強制した複製を返す。UIのスライダーと同じレンジに揃える。
+    func sanitized() -> (config: SurfaceConfig, changed: Bool) {
+        var c = self
+        var changed = false
+
+        let crop = SurfaceConfig.clampedCrop(c.crop)
+        if crop != c.crop { changed = true }
+        c.crop = crop
+
+        let q = c.quad.sanitized()
+        if q.changed { changed = true }
+        c.quad = q.quad
+
+        // レンジは InspectorView のスライダー(:87/:94/:101)と一致させること。
+        // gamma=0 は pow(x,0)=1 で面が全画素最大輝度の白になるため、下限は必ず正にする。
+        let b = MappingPreset.clamp(c.brightness, 0.25, 2.0, default: 1.0)
+        if b != c.brightness { changed = true }
+        c.brightness = b
+
+        let g = MappingPreset.clamp(c.gamma, 0.25, 4.0, default: 1.0)
+        if g != c.gamma { changed = true }
+        c.gamma = g
+
+        let f = MappingPreset.clamp(c.feather, 0.0, 0.3, default: 0.0)
+        if f != c.feather { changed = true }
+        c.feather = f
+
+        if let mesh = c.mesh {
+            let m = mesh.sanitized(fallback: c.quad)
+            if m.changed { changed = true }
+            c.mesh = m.mesh
+        }
+
+        return (c, changed)
+    }
+
+    /// クロップ矩形のクランプ規則(0-1・最小サイズ5%・非有限値は既定へ)。
+    /// setCrop/setExtraCrop/sanitized が共有する唯一の定義。
+    static func clampedCrop(_ rect: CGRect) -> CGRect {
+        let minSize: CGFloat = 0.05
+        guard rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.size.width.isFinite, rect.size.height.isFinite else {
+            return CGRect(x: 0, y: 0, width: 1, height: 1)
+        }
+        var r = rect
+        r.size.width = min(max(r.width, minSize), 1)
+        r.size.height = min(max(r.height, minSize), 1)
+        r.origin.x = min(max(r.origin.x, 0), 1 - r.width)
+        r.origin.y = min(max(r.origin.y, 0), 1 - r.height)
+        return r
+    }
+}
+
+extension WarpMesh {
+    /// 行数・列数・点数の整合と、各点の有限性・値域を強制する。
+    /// 壊れている(点数が合わない・次元が異常)場合は quad から作り直す。
+    func sanitized(fallback quad: Quad) -> (mesh: WarpMesh, changed: Bool) {
+        let maxDim = MappingPreset.Limits.meshDimension
+        guard rows >= 2, cols >= 2, rows <= maxDim, cols <= maxDim,
+              points.count == rows * cols else {
+            return (WarpMesh.fromQuad(quad), true)
+        }
+        var m = self
+        var changed = false
+        for i in m.points.indices {
+            let p = Quad.clamped(m.points[i])
+            if p != m.points[i] { changed = true }
+            m.points[i] = p
+        }
+        return (m, changed)
+    }
+}
+
+extension EffectSettings {
+    /// 値域・有限性を強制した複製を返す。レンジは EffectsView と一致させること。
+    func sanitized() -> (settings: EffectSettings, changed: Bool) {
+        var s = self
+        var changed = false
+        func fix(_ v: inout Double, _ lo: Double, _ hi: Double, _ fallback: Double) {
+            let n = MappingPreset.clamp(v, lo, hi, default: fallback)
+            if n != v { changed = true }
+            v = n
+        }
+        fix(&s.saturation, 0.0, 2.0, 1.0)
+        fix(&s.contrast, 0.5, 1.5, 1.0)
+        fix(&s.brightness, -0.5, 0.5, 0.0)
+        fix(&s.hueDegrees, -180, 180, 0.0)
+        return (s, changed)
     }
 }
 

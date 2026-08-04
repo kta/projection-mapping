@@ -10,17 +10,34 @@ protocol PresetStoreProtocol: AnyObject {
     func listPresets() -> [MappingPreset]
     func save(_ preset: MappingPreset) throws
     func delete(id: UUID) throws
+
+    /// 外部から持ち込まれたJSONを読む(F-PRESET-3)。
+    /// **UI側で JSONDecoder を直に使わないこと** — schemaVersion のゲートと
+    /// 値域・件数の正規化を迂回してしまう。
+    func decodeImported(_ data: Data) throws -> (preset: MappingPreset, adjusted: Bool)
+
+    /// 直近の自動保存が失敗していればその理由。成功していれば nil。
+    /// 自動保存は throw しない代わりに、失敗を観測できる口をここに用意する。
+    var lastAutosaveErrorMessage: String? { get }
 }
 
 /// 永続化に固有のエラー。破損JSONはnil/空配列で握りつぶす(N-REL-1)一方、
 /// 明示的な保存/削除の失敗は呼び出し側(UI)へ通知したいため型で区別する。
 enum PresetStoreError: LocalizedError {
     case documentsDirectoryUnavailable
+    case unsupportedSchemaVersion(found: Int, supported: Int)
+    case malformedJSON
 
     var errorDescription: String? {
         switch self {
         case .documentsDirectoryUnavailable:
             return "保存先ディレクトリにアクセスできません。"
+        case let .unsupportedSchemaVersion(found, supported):
+            return "このプリセットは新しい形式(v\(found))で保存されています。"
+                + "このバージョンのCornerCastはv\(supported)まで対応しています。"
+                + "アプリを最新版に更新してください。"
+        case .malformedJSON:
+            return "プリセットとして読み取れないファイルです。"
         }
     }
 }
@@ -52,9 +69,17 @@ final class PresetStore: PresetStoreProtocol {
         return decoder
     }()
 
-    /// AppServicesは引数なしで生成するため、fileManagerはデフォルト引数で受ける。
-    init(fileManager: FileManager = .default) {
+    /// 保存先のルート。nil なら Documents を使う。
+    /// テストは一時ディレクトリを渡すこと — 既定のままだと本番の lastUsed.json を
+    /// 実際に上書きしてしまい、実機で調整した内容がテスト実行で消える。
+    private let rootDirectory: URL?
+
+    private(set) var lastAutosaveErrorMessage: String?
+
+    /// AppServicesは引数なしで生成するため、いずれもデフォルト引数で受ける。
+    init(fileManager: FileManager = .default, rootDirectory: URL? = nil) {
         self.fileManager = fileManager
+        self.rootDirectory = rootDirectory
     }
 
     // MARK: - PresetStoreProtocol
@@ -65,9 +90,32 @@ final class PresetStore: PresetStoreProtocol {
     }
 
     func saveLastUsed(_ preset: MappingPreset) {
-        // 自動保存はプロトコル上throwしない。失敗してもクラッシュさせず握りつぶす(N-REL-1)。
-        guard let url = lastUsedFileURL() else { return }
-        try? writePreset(preset, to: url)
+        // 自動保存はプロトコル上throwしない(N-REL-1)。ただし**失敗を隠さない**:
+        // 握りつぶしたままだと、ディスクフル等で保存が効いていないことに
+        // ユーザーが気づけず、長時間の調整を積み上げた末に再起動で失う。
+        guard let url = lastUsedFileURL() else {
+            lastAutosaveErrorMessage = PresetStoreError.documentsDirectoryUnavailable.localizedDescription
+            return
+        }
+        do {
+            try writePreset(preset, to: url)
+            lastAutosaveErrorMessage = nil
+        } catch {
+            lastAutosaveErrorMessage = error.localizedDescription
+        }
+    }
+
+    /// 外部JSONの読み込み(F-PRESET-3)。schemaVersion のゲートと正規化を必ず通す。
+    func decodeImported(_ data: Data) throws -> (preset: MappingPreset, adjusted: Bool) {
+        guard let raw = try? decoder.decode(MappingPreset.self, from: data) else {
+            throw PresetStoreError.malformedJSON
+        }
+        guard raw.schemaVersion <= MappingPreset.currentSchemaVersion else {
+            throw PresetStoreError.unsupportedSchemaVersion(
+                found: raw.schemaVersion, supported: MappingPreset.currentSchemaVersion)
+        }
+        let result = raw.sanitized()
+        return (result.preset, result.changed)
     }
 
     func listPresets() -> [MappingPreset] {
@@ -106,14 +154,24 @@ final class PresetStore: PresetStoreProtocol {
 
     // MARK: - 内部ヘルパ
 
-    /// Documents/Presets/ のURL。無ければ作成する。取得不能時はnil。
+    /// Presets/ のURL。無ければ作成する。取得・作成できなければnil。
+    /// 作成に失敗したまま非nilを返すと、以後の書き込みが毎回失敗し続けて理由も残らない。
     private func presetsDirectoryURL() -> URL? {
-        guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        let base: URL
+        if let rootDirectory {
+            base = rootDirectory
+        } else if let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            base = docs
+        } else {
             return nil
         }
-        let dir = docs.appendingPathComponent(Self.presetsDirectoryName, isDirectory: true)
+        let dir = base.appendingPathComponent(Self.presetsDirectoryName, isDirectory: true)
         if !fileManager.fileExists(atPath: dir.path) {
-            try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+            do {
+                try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+            } catch {
+                return nil
+            }
         }
         return dir
     }
@@ -129,6 +187,8 @@ final class PresetStore: PresetStoreProtocol {
     }
 
     /// 読み込み。破損JSON・読み取り不能・未対応スキーマはすべてnilを返しクラッシュしない(N-REL-1)。
+    /// 読めたものは必ず sanitized() を通す — 値域外の値がそのまま合成へ流れると
+    /// 面が真っ白になったり消えたりし、しかもスライダーからは直せなくなる。
     private func decodePreset(at url: URL) -> MappingPreset? {
         guard let data = try? Data(contentsOf: url),
               let preset = try? decoder.decode(MappingPreset.self, from: data) else {
@@ -139,6 +199,6 @@ final class PresetStore: PresetStoreProtocol {
         guard preset.schemaVersion <= MappingPreset.currentSchemaVersion else {
             return nil
         }
-        return preset
+        return preset.sanitized().preset
     }
 }
