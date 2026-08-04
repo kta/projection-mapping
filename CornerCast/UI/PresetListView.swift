@@ -23,6 +23,10 @@ struct PresetListView: View {
     @State private var showImporter = false
     @State private var exportURL: URL?
     @State private var errorMessage: String?
+    /// 削除確認の対象。確認を挟まずに消さない(取り消せないため)。
+    @State private var pendingDeletion: MappingPreset?
+    /// 読み込み時に値を丸めた場合の通知
+    @State private var noticeMessage: String?
 
     private var store: PresetStoreProtocol { AppServices.shared.presetStore }
 
@@ -47,6 +51,28 @@ struct PresetListView: View {
         List {
             actionsSection
             savedPresetsSection
+        }
+        // 削除は取り消せないため必ず確認する(F-PRESET-1の資産を守る)
+        .confirmationDialog(
+            pendingDeletion.map { "「\($0.name)」を削除しますか?" } ?? "",
+            isPresented: Binding(get: { pendingDeletion != nil },
+                                 set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("削除", role: .destructive) {
+                if let target = pendingDeletion { delete(target) }
+                pendingDeletion = nil
+            }
+            Button("キャンセル", role: .cancel) { pendingDeletion = nil }
+        } message: {
+            Text("この操作は取り消せません。")
+        }
+        .alert("読み込みました",
+               isPresented: Binding(get: { noticeMessage != nil },
+                                    set: { if !$0 { noticeMessage = nil } })) {
+            Button("OK") { noticeMessage = nil; dismiss() }
+        } message: {
+            Text(noticeMessage ?? "")
         }
         .modifier(PresetListDialogs(
             showSaveDialog: $showSaveDialog,
@@ -110,9 +136,12 @@ struct PresetListView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .swipeActions(edge: .trailing) {
+        // allowsFullSwipe: false は必須。既定(true)だと**最初に宣言したアクションが
+        // フルスワイプで発火する**ため、行を勢いよく引くだけでタップ0回でプリセットが消える。
+        // 削除は確認ダイアログを必ず挟む(取り消し手段が無いため)。
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
-                delete(preset)
+                pendingDeletion = preset
             } label: {
                 Label("削除", systemImage: "trash")
             }
@@ -123,6 +152,21 @@ struct PresetListView: View {
                 Label("名前変更", systemImage: "pencil")
             }
             .tint(.blue)
+        }
+        // マウス・トラックパッド(Mac Catalyst / iPadOSのポインタ)にはスワイプが無い。
+        // 同じ操作へ到達できる経路をコンテキストメニューでも用意する。
+        .contextMenu {
+            Button {
+                renaming = preset
+                renameText = preset.name
+            } label: {
+                Label("名前変更", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                pendingDeletion = preset
+            } label: {
+                Label("削除", systemImage: "trash")
+            }
         }
     }
 
@@ -144,14 +188,23 @@ struct PresetListView: View {
         presets = store.listPresets()
     }
 
-    /// 現在の状態を新しい名前付きプリセットとして保存
+    /// 現在の状態を名前付きプリセットとして保存する。
+    ///
+    /// **同名の既存プリセットがあれば上書きする。** 常に新しいUUIDを振ると、
+    /// 本番前日に保存した「本番用」を当日調整して保存し直したときに同名が2行に増え、
+    /// どちらが最新か時刻でしか分からなくなる(そして片方を消すと当日版を失う)。
     private func saveCurrent() {
+        let name = newName.isEmpty ? "新しいプリセット" : newName
         var p = viewModel.preset
-        p.id = UUID()
-        p.name = newName.isEmpty ? "新しいプリセット" : newName
+        // 同名が既にあればそのIDを引き継いで上書き。無ければ新規として発番する。
+        p.id = presets.first { $0.name == name }?.id ?? UUID()
+        p.name = name
         p.updatedAt = .now
         do {
             try store.save(p)
+            // 以後の自動保存が同じプリセットを指すよう、編集中の実体にもIDを反映する
+            viewModel.preset.id = p.id
+            viewModel.preset.name = p.name
             reload()
         } catch {
             errorMessage = error.localizedDescription
@@ -208,11 +261,17 @@ struct PresetListView: View {
             defer { if scoped { src.stopAccessingSecurityScopedResource() } }
             do {
                 let data = try Data(contentsOf: src)
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                let preset = try decoder.decode(MappingPreset.self, from: data)
-                viewModel.preset = preset
-                dismiss()
+                // **ここで JSONDecoder を直に使わないこと。**
+                // ストア経由にすることで schemaVersion のゲートと値域・件数の正規化を必ず通す。
+                // 迂回すると、このビルドが読めない値や gamma=0 のような値がそのまま
+                // lastUsed.json へ焼き付き、再起動しても直らなくなる。
+                let result = try store.decodeImported(data)
+                viewModel.preset = result.preset
+                if result.adjusted {
+                    noticeMessage = "一部の値が有効範囲を超えていたため調整しました。"
+                } else {
+                    dismiss()
+                }
             } catch {
                 errorMessage = "プリセットを読み込めませんでした: \(error.localizedDescription)"
             }

@@ -14,11 +14,38 @@ final class InMemoryPresetStore: PresetStoreProtocol {
         self.lastUsed = lastUsed
     }
 
+    /// 自動保存を失敗させたいテスト用のフック
+    var autosaveShouldFail = false
+    private(set) var lastAutosaveErrorMessage: String?
+
     func loadLastUsed() -> MappingPreset? { lastUsed }
-    func saveLastUsed(_ preset: MappingPreset) { lastUsed = preset }
+
+    func saveLastUsed(_ preset: MappingPreset) {
+        if autosaveShouldFail {
+            lastAutosaveErrorMessage = "テスト用の失敗"
+            return
+        }
+        lastUsed = preset
+        lastAutosaveErrorMessage = nil
+    }
+
     func listPresets() -> [MappingPreset] { Array(saved.values) }
     func save(_ preset: MappingPreset) throws { saved[preset.id] = preset }
     func delete(id: UUID) throws { saved[id] = nil }
+
+    func decodeImported(_ data: Data) throws -> (preset: MappingPreset, adjusted: Bool) {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let raw = try? decoder.decode(MappingPreset.self, from: data) else {
+            throw PresetStoreError.malformedJSON
+        }
+        guard raw.schemaVersion <= MappingPreset.currentSchemaVersion else {
+            throw PresetStoreError.unsupportedSchemaVersion(
+                found: raw.schemaVersion, supported: MappingPreset.currentSchemaVersion)
+        }
+        let result = raw.sanitized()
+        return (result.preset, result.changed)
+    }
 }
 
 @MainActor

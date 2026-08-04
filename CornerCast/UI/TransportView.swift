@@ -12,15 +12,21 @@ import Combine
 struct TransportView: View {
     @Bindable var viewModel: MappingViewModel
 
-    // 再生制御は viewModel.activeVideoSource(ExternalDisplayManagerが結線時に設定)へ委譲する。
-    // 再生状態の表示はUIローカルで保持する(ソース側に状態購読APIを持たせない割り切り)。
-    @State private var isPlaying = false
+    // 再生制御は PlaybackCoordinator へ委譲する。
+    // **再生状態をUIローカルに持たないこと。** 以前は isPlaying を自前でトグルしてから
+    // nil かもしれないソースへ委譲していたため、ソースが無いときにアイコンだけ
+    // 一時停止へ変わり「再生中」と表示し続ける嘘が発生していた。
+    private var playback: PlaybackCoordinator? { viewModel.playback }
+
+    /// シーク操作中の一時値。ドラッグ中だけスライダを手元の値で描く。
     @State private var seekPosition: Double = 0
-    /// シーク操作中はタイマー由来の位置更新でスライダを上書きしない
     @State private var isSeeking = false
 
     // ベイク
     @State private var bakeStore = BakeStore()
+    /// 陳腐化バッジ(F-BAKE-3)の判定結果。body評価のたびに index.json を
+    /// 同期読みしないようキャッシュする(投影のCADisplayLinkと同じランループを塞ぐため)。
+    @State private var hasStaleBake = false
     @State private var showBakeDialog = false
     @State private var isExporting = false
     @State private var exportProgress: Double = 0
@@ -32,23 +38,30 @@ struct TransportView: View {
 
     var body: some View {
         HStack(spacing: 16) {
-            // 再生/一時停止
+            // 再生/一時停止。状態は必ず実プレイヤから読む。
             Button {
-                isPlaying.toggle()
-                if isPlaying {
-                    viewModel.activeVideoSource?.play()
-                } else {
-                    viewModel.activeVideoSource?.pause()
-                }
+                playback?.togglePlayPause()
             } label: {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                     .font(.title2)
             }
+            .disabled(!canControl)
+            .accessibilityLabel(isPlaying ? "一時停止" : "再生")
 
             // シーク(ドラッグ確定時に実尺換算でシークする)
-            Slider(value: $seekPosition, in: 0...1) { editing in
+            Slider(value: sliderBinding, in: 0...1) { editing in
                 isSeeking = editing
-                if !editing { seek(toFraction: seekPosition) }
+                if !editing { playback?.seek(toFraction: seekPosition) }
+            }
+            .disabled(!canControl)
+            .accessibilityLabel("再生位置")
+
+            // 操作できないときは黙って無効化せず、理由を1行で示す(無言の無効化にしない)
+            if let reason = playback?.unavailableReason, !canControl {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             // ループ(F-SRC-3)。presetに永続化される。
@@ -70,13 +83,19 @@ struct TransportView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
-        // 音量変更を再生中ソースへ即時反映(presetへの永続化はBinding側で行われる)
+        // 音量変更をリアルタイム・ベイクどちらの経路にも即時反映する
         .onChange(of: viewModel.preset.volume) { _, v in
-            viewModel.activeVideoSource?.volume = Float(v)
+            playback?.applyVolume(v)
         }
-        // 再生位置・再生状態の定期反映(0.5秒間隔で十分)
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            syncPlaybackUI()
+        // ループ設定はプレイヤ構築時に決まるので、変更時は組み直す
+        .onChange(of: viewModel.preset.loop) { _, _ in
+            playback?.applyLoopSetting()
+        }
+        // 陳腐化判定はファイルI/Oを伴うので body から追い出し、関係する変化時のみ再計算する
+        .task(id: viewModel.preset.calibrationFingerprint) {
+            hasStaleBake = bakeStore.list().contains {
+                bakeStore.isStale($0, currentPreset: viewModel.preset)
+            }
         }
         .overlay { if isExporting { exportOverlay } }
         .confirmationDialog("書き出し解像度", isPresented: $showBakeDialog, titleVisibility: .visible) {
@@ -86,12 +105,10 @@ struct TransportView: View {
         }
         .alert("書き出し完了", isPresented: $showCompletionAlert) {
             Button("ベイク再生に切替") {
-                // 結線契約: ベイク再生への切替時はUI側がcontentSourceも設定する
-                // (ExternalDisplayManagerは .bakedVideo(url) を待ち受けるだけ)
+                // selectContent が outputMode との整合を面倒みる(個別に書き換えない)
                 if let record = lastBakeRecord {
-                    viewModel.contentSource = .bakedVideo(record.fileURL)
+                    viewModel.selectContent(.bakedVideo(record.fileURL))
                 }
-                viewModel.outputMode = .bakedPlayback
             }
             Button("そのまま", role: .cancel) {}
         } message: {
@@ -109,7 +126,7 @@ struct TransportView: View {
     // MARK: ベイク操作
 
     @ViewBuilder private var bakeControls: some View {
-        if isStaleBakeExists {
+        if hasStaleBake {
             // F-BAKE-3: プリセット変更でベイクが陳腐化
             Label("再書き出しが必要", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
@@ -121,6 +138,13 @@ struct TransportView: View {
             Label("この設定で書き出し", systemImage: "square.and.arrow.down.on.square")
         }
         .disabled(bakeableURL == nil || isExporting)
+        // 無言でグレーアウトしない。書き出せない理由を示す。
+        .help(bakeableURL == nil ? "動画を選ぶと書き出せます" : "")
+        if bakeableURL == nil && !isExporting {
+            Text("動画を選ぶと書き出せます")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var exportOverlay: some View {
@@ -146,9 +170,17 @@ struct TransportView: View {
         return nil
     }
 
-    /// 現在のプリセットに対して陳腐化しているベイクが存在するか(F-BAKE-3)
-    private var isStaleBakeExists: Bool {
-        bakeStore.list().contains { bakeStore.isStale($0, currentPreset: viewModel.preset) }
+    // MARK: 再生状態(すべて PlaybackCoordinator 由来)
+
+    private var isPlaying: Bool { playback?.isPlaying ?? false }
+    private var canControl: Bool { playback?.canControlPlayback ?? false }
+
+    /// ドラッグ中は手元の値、それ以外は実プレイヤの位置を返す
+    private var sliderBinding: Binding<Double> {
+        Binding(
+            get: { isSeeking ? seekPosition : (playback?.positionFraction ?? 0) },
+            set: { seekPosition = $0 }
+        )
     }
 
     private func startBake(size: CGSize) {
@@ -192,21 +224,4 @@ struct TransportView: View {
         isExporting = false
     }
 
-    /// 0-1のシーク位置を実尺(秒)へ換算してシークする。尺が取れない間は何もしない。
-    private func seek(toFraction fraction: Double) {
-        guard let source = viewModel.activeVideoSource,
-              let duration = source.player?.currentItem?.duration.seconds,
-              duration.isFinite, duration > 0 else { return }
-        source.seek(to: fraction * duration)
-    }
-
-    /// 再生状態・再生位置をUIへ反映する(シーク操作中はスライダを触らない)
-    private func syncPlaybackUI() {
-        guard let player = viewModel.activeVideoSource?.player else { return }
-        isPlaying = player.timeControlStatus == .playing
-        guard !isSeeking,
-              let duration = player.currentItem?.duration.seconds,
-              duration.isFinite, duration > 0 else { return }
-        seekPosition = min(max(player.currentTime().seconds / duration, 0), 1)
-    }
 }

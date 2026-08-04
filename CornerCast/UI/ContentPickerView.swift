@@ -30,7 +30,7 @@ struct ContentPickerView: View {
                 sampleSection
                 Section("テストパターン") {
                     Button {
-                        viewModel.contentSource = .testPattern
+                        viewModel.selectContent(.testPattern)
                         dismiss()
                     } label: {
                         Label("テストパターンを表示", systemImage: "grid")
@@ -98,7 +98,7 @@ struct ContentPickerView: View {
                 ForEach(SampleVideo.available) { sample in
                     Button {
                         guard let url = sample.url else { return }
-                        viewModel.contentSource = .video(url)
+                        viewModel.selectContent(.video(url))
                         dismiss()
                     } label: {
                         Label {
@@ -136,8 +136,7 @@ struct ContentPickerView: View {
     private func bakeRow(_ record: BakeRecord) -> some View {
         Button {
             // 結線契約(docs/05 §3-7): ベイク再生はUI側がcontentSourceとoutputModeを設定する
-            viewModel.contentSource = .bakedVideo(record.fileURL)
-            viewModel.outputMode = .bakedPlayback
+            viewModel.selectContent(.bakedVideo(record.fileURL))
             dismiss()
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -173,7 +172,8 @@ struct ContentPickerView: View {
             do {
                 if let movie = try await item.loadTransferable(type: PickedMovie.self) {
                     await MainActor.run {
-                        viewModel.contentSource = .video(movie.url)
+                        Self.cleanupOldImports(keeping: movie.url)
+                        viewModel.selectContent(.video(movie.url))
                         isLoading = false
                         dismiss()
                     }
@@ -195,7 +195,8 @@ struct ContentPickerView: View {
                     let dest = Self.tmpURL(ext: ext)
                     try data.write(to: dest)
                     await MainActor.run {
-                        viewModel.contentSource = .image(dest)
+                        Self.cleanupOldImports(keeping: dest)
+                        viewModel.selectContent(.image(dest))
                         isLoading = false
                         dismiss()
                     }
@@ -227,9 +228,11 @@ struct ContentPickerView: View {
                 try FileManager.default.copyItem(at: src, to: dest)
                 let type = UTType(filenameExtension: src.pathExtension)
                 if let type, type.conforms(to: .movie) {
-                    viewModel.contentSource = .video(dest)
+                    Self.cleanupOldImports(keeping: dest)
+                        viewModel.selectContent(.video(dest))
                 } else {
-                    viewModel.contentSource = .image(dest)
+                    Self.cleanupOldImports(keeping: dest)
+                        viewModel.selectContent(.image(dest))
                 }
                 dismiss()
             } catch {
@@ -247,6 +250,28 @@ struct ContentPickerView: View {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(ext)
+    }
+
+    /// 取り込み済みの古いtmpコピーを掃除する。
+    ///
+    /// 取り込みは毎回UUID名で**原寸コピー**を作るので、候補の動画を何本か見比べただけで
+    /// 数GBがtmpに残り続ける。OSの回収を待つとベイクの空き容量チェックが
+    /// 自分の残骸に圧迫されて失敗しうるため、新しく取り込んだ時点で前のものを消す。
+    /// 現在使用中のURLだけは必ず残すこと。
+    private static func cleanupOldImports(keeping current: URL?) {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+        guard let urls = try? fm.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: nil) else { return }
+        let mediaExtensions: Set<String> = ["mov", "mp4", "m4v", "jpg", "jpeg", "png", "heic"]
+        for url in urls where mediaExtensions.contains(url.pathExtension.lowercased()) {
+            guard url != current else { continue }
+            // 取り込みが作るのはUUID名のみ。それ以外(ガイドPNG等)は触らない。
+            guard UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil else {
+                continue
+            }
+            try? fm.removeItem(at: url)
+        }
     }
 }
 

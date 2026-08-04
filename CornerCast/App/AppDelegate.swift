@@ -8,7 +8,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        true
+        // 永続化済みの設定に従って外部制御(F-CTRL-1)を起動する。
+        // これが無いと再起動のたびに待ち受けが消え、設定画面だけが「有効」と表示され続ける。
+        MainActor.assumeIsolated { AppServices.shared.applicationDidFinishLaunching() }
+        return true
     }
 
     func application(_ application: UIApplication,

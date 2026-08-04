@@ -33,7 +33,7 @@ struct SimpleSetupView: View {
         .background(Color.ccBackground.ignoresSafeArea())
         .onAppear {
             // 壁に映る模様(テストパターン)と画面の枠を対応づける
-            viewModel.contentSource = .testPattern
+            viewModel.selectContent(.testPattern)
             syncSelection()
         }
         .onChange(of: step) { _, _ in syncSelection() }
@@ -90,7 +90,8 @@ struct SimpleSetupView: View {
         case 4:
             return "写真アプリやファイルから、お好きな動画や写真をえらべます。"
         default:
-            return "あとから右上のボタンで、いつでも調整しなおせます。"
+            // 「新規」ボタンは .topBarLeading = 左上にある(EditorView)。
+            return "あとから左上の「新規」から、いつでも調整しなおせます。"
         }
     }
 
@@ -294,12 +295,10 @@ private struct SimpleAdjustCanvas: View {
         viewModel.preset.calibrationFingerprint
     }
 
+    /// 定義は Surface.identityRGB(唯一の置き場)。
+    /// 以前ここだけ別のピンクを使っており、同じ面が投影と画面で違う色に見えていた。
     private var color: Color {
-        switch surface {
-        case .leftWall: return .cyan
-        case .frontWall: return Color(red: 1, green: 0.26, blue: 0.85)
-        case .floor: return .yellow
-        }
+        Surface.swiftUIColor(surface)
     }
 
     private func quadPath(_ q: Quad, in rect: CGRect) -> Path {
@@ -323,6 +322,8 @@ private struct BigHandle: View {
     let color: Color
 
     @State private var began = false
+    /// VoiceOverの上下スワイプで動かす軸
+    @State private var adjustAxis: Axis = .horizontal
 
     var body: some View {
         let normalized = viewModel.preset.surfaces[surface]?.quad[corner] ?? .zero
@@ -348,7 +349,22 @@ private struct BigHandle: View {
                 }
                 .onEnded { _ in began = false }
         )
-        .accessibilityLabel("\(surface.displayName)の角")
-        .accessibilityHint("ドラッグして部屋の角に合わせます")
+        // 4隅すべてが同じラベルだと VoiceOver では区別できない。頂点名を必ず含める。
+        // ヒントも「ドラッグして」ではなく、VoiceOverで実際に行える操作を書く。
+        .accessibilityElement()
+        .accessibilityLabel("\(surface.displayName) \(MeshCanvasView.cornerName(corner))")
+        .accessibilityValue(MeshCanvasView.positionDescription(
+            viewModel.preset.surfaces[surface]?.quad[corner] ?? .zero))
+        .accessibilityHint("上下にスワイプすると位置を調整します")
+        .accessibilityAdjustableAction { direction in
+            let step: Double = direction == .increment ? 1 : -1
+            switch adjustAxis {
+            case .horizontal: viewModel.nudge(corner: corner, of: surface, dx: step, dy: 0)
+            case .vertical: viewModel.nudge(corner: corner, of: surface, dx: 0, dy: step)
+            }
+        }
+        .accessibilityAction(named: adjustAxis == .horizontal ? "縦方向を調整" : "横方向を調整") {
+            adjustAxis = adjustAxis == .horizontal ? .vertical : .horizontal
+        }
     }
 }

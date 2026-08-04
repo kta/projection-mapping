@@ -15,10 +15,37 @@ final class EditorPreviewRenderer {
     private let context = CIContext(options: [.cacheIntermediates: false])
     private let composer = FrameComposer()
     private let testPattern = TestPatternGenerator()
-    /// 動画のポスターフレーム(先頭フレーム)キャッシュ。URL単位。
-    private var posterCache: [URL: CIImage] = [:]
 
-    private init() {}
+    /// 動画のポスターフレーム(先頭フレーム)キャッシュ。
+    ///
+    /// **NSCache であること。** 値は非圧縮ビットマップ(1080pで約8MB、4Kで約33MB)で、
+    /// 取り込みのたびにUUID名の新しいtmpへコピーされるためキーは毎回変わる。
+    /// 素の Dictionary だとエビクションも memory-warning 応答も無く、
+    /// 候補の動画を数本見比べただけで数百MBが常駐したままになる。
+    private let posterCache: NSCache<NSURL, PosterEntry> = {
+        let cache = NSCache<NSURL, PosterEntry>()
+        cache.countLimit = 8
+        return cache
+    }()
+
+    /// NSCache は AnyObject しか保持できないので CIImage を包む
+    final class PosterEntry {
+        let image: CIImage
+        init(_ image: CIImage) { self.image = image }
+    }
+
+    /// 直近に取得できたライブフレーム(1枚だけ保持)。コンテンツ切替時に破棄する。
+    private var lastLiveFrame: CIImage?
+    private var lastLiveKey: String?
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [posterCache] _ in
+            posterCache.removeAllObjects()
+        }
+    }
 
     /// 現在のプリセット+コンテンツからプレビュー画像を合成する。
     /// コンテンツ未選択・フレーム取得失敗時はnil(呼び出し側は黒背景のままにする)。
@@ -33,6 +60,12 @@ final class EditorPreviewRenderer {
             guard let poster = posterFrame(for: url) else { return nil }
             return uiImage(from: scaled(poster, to: size), size: size)
         case .testPattern, .image, .video:
+            // コンテンツが変わったら保持しているライブフレームを捨てる(前の動画が残らないように)
+            let key = String(describing: content)
+            if key != lastLiveKey {
+                lastLiveKey = key
+                lastLiveFrame = nil
+            }
             let params = RenderParameters(canvasSize: size, preset: preset)
             guard let frame = sourceFrame(for: content, params: params) else { return nil }
             let composed = composer.compose(frame: frame, params: params)
@@ -67,20 +100,34 @@ final class EditorPreviewRenderer {
         case .image(let url):
             return CIImage(contentsOf: url)
         case .video(let url):
+            // 再生中なら**そのフレーム**を使う。プロジェクター未接続でも
+            // 手元のプレビューが実際に動くようにするため(以前は先頭フレームの静止画だけだった)。
+            //
+            // 新フレームが無いtickでは直近のライブフレームを再利用する。
+            // 外部ディスプレイ接続中は OutputRenderer と同じ AVPlayerItemVideoOutput を
+            // 引くため取りこぼしが起きるが、ポスターへ戻すとちらつくので保持した方を使う。
+            if let live = AppServices.shared.playback.realtimeSource?
+                .copyFrame(forHostTime: CACurrentMediaTime()) {
+                lastLiveFrame = live
+                return live
+            }
+            if let last = lastLiveFrame { return last }
             return posterFrame(for: url)
         case .none, .bakedVideo:
             return nil
         }
     }
 
-    /// 動画の先頭フレームを取得してキャッシュする(プレビューは静止でよい)。
+    /// 動画の先頭フレーム。再生中のライブフレームが取れないときのフォールバック。
     private func posterFrame(for url: URL) -> CIImage? {
-        if let cached = posterCache[url] { return cached }
+        if let cached = posterCache.object(forKey: url as NSURL) { return cached.image }
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
         generator.appliesPreferredTrackTransform = true
+        // フルサイズのビットマップを持たない。プレビューは高々640×360で足りる。
+        generator.maximumSize = CGSize(width: 960, height: 540)
         guard let cg = try? generator.copyCGImage(at: .zero, actualTime: nil) else { return nil }
         let image = CIImage(cgImage: cg)
-        posterCache[url] = image
+        posterCache.setObject(PosterEntry(image), forKey: url as NSURL)
         return image
     }
 

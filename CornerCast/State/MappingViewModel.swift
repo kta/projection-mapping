@@ -20,7 +20,9 @@ final class MappingViewModel {
         case realtime      // F-RT-1
         case bakedPlayback // F-BAKE-2
     }
-    var outputMode: OutputMode = .realtime
+    var outputMode: OutputMode = .realtime {
+        didSet { if outputMode != oldValue { playback?.reconcile() } }
+    }
 
     enum ContentSource: Equatable {
         case none
@@ -28,8 +30,27 @@ final class MappingViewModel {
         case image(URL)
         case video(URL)
         case bakedVideo(URL)             // ベイク再生用(ワープ処理なしで再生)
+
+        /// この素材を再生できる出力モード。両者の整合はここが唯一の定義。
+        var requiredOutputMode: OutputMode {
+            if case .bakedVideo = self { return .bakedPlayback }
+            return .realtime
+        }
     }
-    var contentSource: ContentSource = .testPattern
+    var contentSource: ContentSource = .testPattern {
+        didSet { if contentSource != oldValue { playback?.reconcile() } }
+    }
+
+    /// コンテンツを選ぶ唯一の入口(F-SRC-1/2 / F-BAKE-2)。
+    ///
+    /// **contentSource だけを書き換えてはいけない。** 出力モードと素材の種別を
+    /// 整合させる主体が居ないと、ベイク再生モードのまま別の動画を選んだときに
+    /// 前の映像が投影され続ける(切り替わらないので、ユーザーは操作が効いていないと感じる)。
+    /// 逆にベイク済み動画をリアルタイムモードで選ぶと、合成済みの絵をもう一度ワープしてしまう。
+    func selectContent(_ source: ContentSource) {
+        outputMode = source.requiredOutputMode
+        contentSource = source
+    }
 
     struct DisplayState: Equatable {
         var isConnected: Bool = false
@@ -50,10 +71,11 @@ final class MappingViewModel {
 
     // MARK: 依存
 
-    /// 現在アクティブな動画ソース(ExternalDisplayManagerが結線時に設定・解除する)。
-    /// UIのトランスポート(TransportView)が再生制御(play/pause/seek)に使う。
-    /// 再生状態の表示はUI側ローカル状態でよいため観測対象にしない。
-    @ObservationIgnored weak var activeVideoSource: VideoSource?
+    /// 再生パイプラインの所有者(AppServicesが生成直後に設定する)。
+    /// 外部ディスプレイの接続有無に関わらず常に生きている — トランスポート(TransportView)も
+    /// 外部制御(ControlHub)も、再生操作はすべてここへ委譲する。
+    /// 参照自体は差し替わらないので観測対象にしない(中身の状態は PlaybackCoordinator 側が @Observable)。
+    @ObservationIgnored var playback: PlaybackCoordinator?
 
     @ObservationIgnored private let presetStore: PresetStoreProtocol
     @ObservationIgnored private var undoStack: [MappingPreset] = []
@@ -81,7 +103,7 @@ final class MappingViewModel {
         selectedExtraID = template == .freeform ? preset.extras.first?.id : nil
         selectedMaskID = nil
         if template == .sample {
-            contentSource = .testPattern
+            selectContent(.testPattern)
         }
         preset.updatedAt = .now
     }
@@ -109,15 +131,26 @@ final class MappingViewModel {
         preset.updatedAt = .now
     }
 
-    /// 微調整(F-UI-3): 1px相当のナッジ。キャンバス解像度が未知のUI側からはpt換算せず
-    /// 「出力1080p想定で1px = 1/1080」を単位とする。
+    /// 微調整(F-UI-3): 出力1px相当のナッジ。
+    ///
+    /// 正規化座標の x は「幅に対する比」、y は「高さに対する比」なので、
+    /// 単位は軸ごとに違う。以前は縦横とも 1/1080 だったため、横方向は
+    /// 1080p で 1.78px、4K で 3.56px 動いており「±1px」の表示と食い違っていた。
     func nudge(corner: Quad.Corner, of surface: Surface, dx: Double, dy: Double) {
         guard let quad = preset.surfaces[surface]?.quad else { return }
         pushUndo()
-        let unit = 1.0 / 1080.0
+        let unit = nudgeUnit
         let current = quad[corner]
         move(corner: corner, of: surface,
-             to: CGPoint(x: current.x + dx * unit, y: current.y + dy * unit))
+             to: CGPoint(x: current.x + dx * unit.width, y: current.y + dy * unit.height))
+    }
+
+    /// 出力1pxに相当する正規化量(軸別)。外部ディスプレイ未接続時は1080pを仮定する。
+    var nudgeUnit: CGSize {
+        let r = displayState.resolution
+        let w = (r.width.isFinite && r.width >= 1) ? r.width : 1920
+        let h = (r.height.isFinite && r.height >= 1) ? r.height : 1080
+        return CGSize(width: 1.0 / w, height: 1.0 / h)
     }
 
     /// 面全体を平行移動する(F-UI-7)。baseはジェスチャ開始時のquad。
@@ -142,15 +175,25 @@ final class MappingViewModel {
         preset.updatedAt = .now
     }
 
-    /// setCrop/setExtraCropで共有するクランプ規則(0-1・最小サイズ5%)
+    /// クロップだけを既定へ戻す(F-CROP-1)。
+    /// 12点の調整は保ったまま、切り出し領域だけをやり直したいことがある。
+    /// resetAll は quad まで戻してしまうため、別の入口が要る。
+    func resetCrops() {
+        guard !isEditLocked else { return }
+        pushUndo()
+        let def = MappingPreset.makeDefault()
+        for s in Surface.allCases {
+            if let crop = def.surfaces[s]?.crop {
+                preset.surfaces[s]?.crop = crop
+            }
+        }
+        preset.updatedAt = .now
+    }
+
+    /// setCrop/setExtraCropで共有するクランプ規則(0-1・最小サイズ5%)。
+    /// 実体は SurfaceConfig 側に置き、デコード時の sanitize と同一規則を共有する。
     static func clampedCrop(_ rect: CGRect) -> CGRect {
-        let minSize: CGFloat = 0.05
-        var r = rect
-        r.size.width = min(max(r.width, minSize), 1)
-        r.size.height = min(max(r.height, minSize), 1)
-        r.origin.x = min(max(r.origin.x, 0), 1 - r.width)
-        r.origin.y = min(max(r.origin.y, 0), 1 - r.height)
-        return r
+        SurfaceConfig.clampedCrop(rect)
     }
 
     // MARK: 自由面(F-FREE-1)
@@ -214,6 +257,7 @@ final class MappingViewModel {
 
     /// 自由面の設定(明るさ/ガンマ/フェザー/名前)を更新する汎用ミューテータ
     func updateExtra(id: UUID, _ mutate: (inout ExtraSurface) -> Void) {
+        guard !isEditLocked else { return }
         guard let i = preset.extras.firstIndex(where: { $0.id == id }) else { return }
         var extras = preset.extras
         mutate(&extras[i])
@@ -317,43 +361,71 @@ final class MappingViewModel {
                        y: min(max(delta.y, -minY), 1 - maxY))
     }
 
+    /// 頂点リンク(F-WARP-5)の伝播。
+    ///
+    /// **推移閉包を取ること。** 部屋のコーナーで左壁・正面壁・床が交わる点は
+    /// 3頂点で表され、既定プリセットでは leftWall.bottomRight—frontWall.bottomLeft と
+    /// frontWall.bottomLeft—floor.topLeft の2本の鎖でつながる。
+    /// 1ホップしか回さないと、鎖の端(leftWall側)を動かしたときに floor が置き去りになり、
+    /// 「常に同一座標に保つ」という CornerLink の宣言が破れる。しかも編集順に依存するため、
+    /// リンクを信じて作業しているユーザーには気づけないまま継ぎ目が割れていく。
     private func resolveLinks(changed ref: CornerLink.CornerRef, to p: CGPoint) {
-        for link in preset.links where link.enabled {
-            if link.a == ref {
-                preset.surfaces[link.b.surface]?.quad[link.b.corner] = p
-            } else if link.b == ref {
-                preset.surfaces[link.a.surface]?.quad[link.a.corner] = p
+        var visited: Set<CornerLink.CornerRef> = [ref]
+        var frontier: [CornerLink.CornerRef] = [ref]
+
+        while let current = frontier.popLast() {
+            for link in preset.links where link.enabled {
+                let neighbor: CornerLink.CornerRef?
+                if link.a == current {
+                    neighbor = link.b
+                } else if link.b == current {
+                    neighbor = link.a
+                } else {
+                    neighbor = nil
+                }
+                guard let next = neighbor, !visited.contains(next) else { continue }
+                visited.insert(next)
+                frontier.append(next)
+                preset.surfaces[next.surface]?.quad[next.corner] = p
             }
         }
     }
 
     func setLink(id: UUID, enabled: Bool) {
+        guard !isEditLocked else { return }
         guard let i = preset.links.firstIndex(where: { $0.id == id }) else { return }
         pushUndo()
         preset.links[i].enabled = enabled
         if enabled {
-            // リンク有効化時はa側の現在位置にb側を吸着させる
+            // リンク有効化時はa側の現在位置へ、連結する頂点すべてを吸着させる
             let link = preset.links[i]
             if let p = preset.surfaces[link.a.surface]?.quad[link.a.corner] {
-                preset.surfaces[link.b.surface]?.quad[link.b.corner] = p
+                resolveLinks(changed: link.a, to: p)
             }
         }
+        preset.updatedAt = .now
     }
 
     // MARK: リセット / アンドゥ(F-UI-4)
 
+    // 編集ロック(F-UI-6)は本番投影中の誤操作を防ぐためのもの。
+    // リセットは最も破壊的な操作なので、ロックを最優先で尊重する。
     func resetSurface(_ surface: Surface) {
+        guard !isEditLocked else { return }
         pushUndo()
         if let def = MappingPreset.makeDefault().surfaces[surface] {
             preset.surfaces[surface] = def
         }
+        preset.updatedAt = .now
     }
 
     func resetAll() {
+        guard !isEditLocked else { return }
         pushUndo()
         let def = MappingPreset.makeDefault()
         preset.surfaces = def.surfaces
         preset.links = def.links
+        preset.updatedAt = .now
     }
 
     func undo() {

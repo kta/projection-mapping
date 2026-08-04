@@ -88,7 +88,7 @@ struct EditorView: View {
                 Label("コンテンツ", systemImage: "photo.on.rectangle")
             }
             Button {
-                viewModel.contentSource = .testPattern
+                viewModel.selectContent(.testPattern)
             } label: {
                 Label("テストパターン", systemImage: "grid")
             }
@@ -116,6 +116,18 @@ struct EditorView: View {
     /// あまり使わない項目(外部制御 / ヘルプ)は「…」メニューに畳んで混雑を避ける。
     private var trailingToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
+            // アンドゥ(F-UI-4)はツールバーに常設する。
+            // インスペクタ最下部だけに置くと 11インチでは画面外に埋もれ、
+            // 「戻せる」ことに気づけない。Cmd+Z も結線しておく(iPadの外付けキーボード /
+            // Mac Catalyst。従来はコード上どこにも結線されていなかった)。
+            Button {
+                viewModel.undo()
+            } label: {
+                Label("元に戻す", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(!viewModel.canUndo)
+            .keyboardShortcut("z", modifiers: .command)
+
             Button {
                 showEffects = true
             } label: {
@@ -148,9 +160,11 @@ struct EditorView: View {
     private var outputStatusIndicator: some View {
         let state = viewModel.displayState
         return HStack(spacing: 6) {
-            Circle()
-                .fill(state.isConnected ? Color.green : Color.gray)
-                .frame(width: 10, height: 10)
+            // 色だけで接続状態を伝えないこと。形(塗り/中抜き)でも区別し、
+            // VoiceOver には状態を言葉で読ませる。
+            Image(systemName: state.isConnected ? "circle.fill" : "circle")
+                .font(.system(size: 10))
+                .foregroundStyle(state.isConnected ? Color.green : Color.secondary)
             if state.isConnected {
                 Text("\(Int(state.resolution.width))×\(Int(state.resolution.height))")
                     .font(.caption)
@@ -161,5 +175,10 @@ struct EditorView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("プロジェクター")
+        .accessibilityValue(state.isConnected
+            ? "接続中、\(Int(state.resolution.width))×\(Int(state.resolution.height))"
+            : "未接続")
     }
 }

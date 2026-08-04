@@ -14,35 +14,31 @@ import os
 final class ExternalDisplayManager {
     private let viewModel: MappingViewModel
     private let composer: FrameComposer
+    /// 再生パイプラインの所有者。ソースの生成・停止は一切こちらの責務ではない。
+    private let playback: PlaybackCoordinator
     private var renderer: OutputRenderer?
 
     // MARK: 接続状態
     private weak var host: OutputHostViewController?
     private var screen: UIScreen?
     private var canvasSize: CGSize = .zero
-
-    // MARK: ソース
-    /// 現在の実時間ソース。動画は停止のため型付き参照を保持する。
-    private var videoSource: VideoSource?
-    /// テストパターンは毎フレームのparamsをupdate(params:)で渡す必要があるため型付き参照を保持する。
-    private var testPattern: TestPatternGenerator?
-
-    // MARK: ベイク再生
-    private var bakedPlayer: AVQueuePlayer?
-    private var bakedLooper: AVPlayerLooper?
+    /// 解像度変更の購読(F-OUT-5)。プロジェクタは電源投入直後に1080pで応答し、
+    /// 数秒後に4Kへ再ネゴシエートすることがある。この間シーンは切断されないので、
+    /// 接続時に一度読んだきりだとドローアブルが実パネルと食い違ったままになる。
+    private var modeChangeObserver: NSObjectProtocol?
 
     // MARK: 監視(ポーリング)
     private var syncTask: Task<Void, Never>?
-    private var lastContentSource: MappingViewModel.ContentSource?
     private var lastOutputMode: MappingViewModel.OutputMode?
 
-    /// レンダラ(バックグラウンドのCADisplayLinkスレッド)へ渡す最新スナップショット。
+    /// レンダラ(CADisplayLink)へ渡す最新スナップショット。
     /// MainActorから書き込み、レンダラ側から読み出すためロックで保護する。
     private let paramsBox = OSAllocatedUnfairLock<RenderParameters?>(initialState: nil)
 
-    init(viewModel: MappingViewModel, composer: FrameComposer) {
+    init(viewModel: MappingViewModel, composer: FrameComposer, playback: PlaybackCoordinator) {
         self.viewModel = viewModel
         self.composer = composer
+        self.playback = playback
     }
 
     // MARK: - 接続 / 切断
@@ -52,35 +48,39 @@ final class ExternalDisplayManager {
         self.screen = screen
         self.host = host
 
-        // 出力解像度(F-OUT-5): currentModeのピクセルサイズを優先し、無ければbounds×scaleで代替。
-        let resolution = screen.currentMode?.size
-            ?? CGSize(width: screen.bounds.width * screen.scale,
-                      height: screen.bounds.height * screen.scale)
-        self.canvasSize = resolution
-        host.metalLayer.drawableSize = resolution
-
-        let refreshRate = Double(screen.maximumFramesPerSecond)
-
-        // 接続状態を反映(F-OUT-3)
-        viewModel.displayState = MappingViewModel.DisplayState(
-            isConnected: true, resolution: resolution, refreshRate: refreshRate)
+        updateResolution(from: screen)
 
         // レンダラ生成・結線
         let r = OutputRenderer(composer: composer)
         r.metalLayer = host.metalLayer
-        r.paramsProvider = { [paramsBox, resolution] in
+        r.paramsProvider = { [paramsBox] in
             // ViewModelを直接触らず、ロック保護済みの最新スナップショットを返す。
-            paramsBox.withLock { $0 } ?? RenderParameters(canvasSize: resolution, preset: .makeDefault())
+            // フォールバックも「接続時の解像度」を焼き込まず、box が空なら描画をスキップさせる。
+            paramsBox.withLock { $0 } ?? RenderParameters(canvasSize: .zero, preset: .makeDefault())
         }
         self.renderer = r
 
         // レンダラ開始前にboxを埋めておく。
         pushParams()
 
-        // 現在のcontentSource/outputModeに合わせて結線し、変化検知の基準を設定。
-        lastContentSource = viewModel.contentSource
         lastOutputMode = viewModel.outputMode
         reconfigure()
+
+        // 解像度の再ネゴシエートに追随する(F-OUT-5)
+        modeChangeObserver = NotificationCenter.default.addObserver(
+            forName: UIScreen.modeDidChangeNotification, object: screen, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let screen = self.screen else { return }
+                self.updateResolution(from: screen)
+                self.pushParams()
+            }
+        }
+
+        // 投影中は画面を消灯させない(N-THERM-2)。条件は「投影中」であって
+        // 「メインUIがアクティブ」ではない — Split View で他アプリに触れただけで
+        // 自動ロックが復活し、上映が数分で止まってしまうため。
+        UIApplication.shared.isIdleTimerDisabled = true
 
         startSyncLoop()
     }
@@ -89,19 +89,33 @@ final class ExternalDisplayManager {
         stopSyncLoop()
         renderer?.stop()
         renderer = nil
-        stopBakedPlayback()
-        videoSource?.pause()
-        videoSource = nil
-        viewModel.activeVideoSource = nil
-        testPattern = nil
+        if let modeChangeObserver {
+            NotificationCenter.default.removeObserver(modeChangeObserver)
+        }
+        modeChangeObserver = nil
         host = nil
         screen = nil
         canvasSize = .zero
-        lastContentSource = nil
         lastOutputMode = nil
         paramsBox.withLock { $0 = nil }
 
         viewModel.displayState = MappingViewModel.DisplayState()
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    /// 出力解像度(F-OUT-5)を screen から読み直し、キャンバス・ドローアブル・表示状態へ反映する。
+    /// 接続時とモード変更時の両方から呼ぶ。
+    private func updateResolution(from screen: UIScreen) {
+        let resolution = screen.currentMode?.size
+            ?? CGSize(width: screen.bounds.width * screen.scale,
+                      height: screen.bounds.height * screen.scale)
+        guard resolution.width > 0, resolution.height > 0 else { return }
+        canvasSize = resolution
+        host?.metalLayer.drawableSize = resolution
+        viewModel.displayState = MappingViewModel.DisplayState(
+            isConnected: true,
+            resolution: resolution,
+            refreshRate: Double(screen.maximumFramesPerSecond))
     }
 
     // MARK: - パラメータ同期(ドラッグ即反映)
@@ -114,7 +128,7 @@ final class ExternalDisplayManager {
         let params = currentParams()
         paramsBox.withLock { $0 = params }
         // テストパターンはcrop構成の変化を検知して再生成する(quad変化ではparamsのみ更新)。
-        testPattern?.update(params: params)
+        playback.update(params: params)
     }
 
     // MARK: - 監視ループ
@@ -139,91 +153,51 @@ final class ExternalDisplayManager {
     private func tick() {
         pushParams()
 
-        let contentChanged = viewModel.contentSource != lastContentSource
-        let modeChanged = viewModel.outputMode != lastOutputMode
-        if contentChanged || modeChanged {
-            lastContentSource = viewModel.contentSource
+        // ソースの生成・停止は PlaybackCoordinator の責務。ここは表示レイヤの切替と
+        // レンダラへのソース差し替えだけを追随させる。
+        if viewModel.outputMode != lastOutputMode {
             lastOutputMode = viewModel.outputMode
             reconfigure()
+            return
+        }
+        switch viewModel.outputMode {
+        case .realtime:
+            if !Self.isSame(renderer?.source, playback.realtimeSource) {
+                renderer?.source = playback.realtimeSource
+            }
+        case .bakedPlayback:
+            if host?.player !== playback.bakedPlayer {
+                host?.player = playback.bakedPlayer
+            }
         }
     }
 
-    // MARK: - 結線(モード / ソース切替)
+    /// 参照同一性の比較(FrameSourceはプロトコルなので ObjectIdentifier で比べる)
+    private static func isSame(_ a: FrameSource?, _ b: FrameSource?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return ObjectIdentifier(x) == ObjectIdentifier(y)
+        default: return false
+        }
+    }
 
-    /// 現在の outputMode / contentSource に合わせてパイプラインを組み替える。
-    /// 変化検知後にのみ呼ぶこと(プレイヤやソースを毎回作り直すため)。
+    // MARK: - 結線(表示モードの切替)
+
+    /// 現在の outputMode に合わせて表示レイヤとレンダラを組み替える。
     private func reconfigure() {
-        // 直前の実時間ソースを停止
-        videoSource?.pause()
-        videoSource = nil
-        viewModel.activeVideoSource = nil
-        testPattern = nil
-
         switch viewModel.outputMode {
         case .bakedPlayback:
             // ベイク再生はHWデコードのみ。CADisplayLink駆動のレンダラは止める(N-THERM-1)。
             renderer?.stop()
             renderer?.source = nil
-            startBakedPlayback()
+            host?.setMode(.bakedPlayback)
+            host?.player = playback.bakedPlayer
 
         case .realtime:
-            stopBakedPlayback()
+            host?.player = nil
             host?.setMode(.realtime)
-            renderer?.source = makeRealtimeSource(from: viewModel.contentSource)
+            renderer?.source = playback.realtimeSource
             if let screen { renderer?.start(on: screen) }   // start()は冪等
         }
-    }
-
-    private func makeRealtimeSource(from content: MappingViewModel.ContentSource) -> FrameSource? {
-        switch content {
-        case .none:
-            return nil
-        case .testPattern:
-            let tp = TestPatternGenerator()
-            tp.update(params: currentParams())
-            testPattern = tp
-            return tp
-        case .image(let url):
-            return StillImageSource(url: url)
-        case .video(let url):
-            let vs = VideoSource(url: url, loop: viewModel.preset.loop)
-            vs.volume = Float(viewModel.preset.volume)
-            vs.play()
-            videoSource = vs
-            // UIのトランスポートから同一インスタンスを制御できるよう公開する(結線契約)
-            viewModel.activeVideoSource = vs
-            return vs
-        case .bakedVideo:
-            // ベイク済み動画はベイク再生モード(AVPlayerLayer)で扱う。実時間パスでは表示しない。
-            return nil
-        }
-    }
-
-    private func startBakedPlayback() {
-        host?.setMode(.bakedPlayback)
-        guard case let .bakedVideo(url) = viewModel.contentSource else {
-            // ベイク動画が未選択。黒画面のまま待機。
-            return
-        }
-        let item = AVPlayerItem(url: url)
-        let queue = AVQueuePlayer()
-        if viewModel.preset.loop {
-            // シームレスループ(F-SRC-3)
-            bakedLooper = AVPlayerLooper(player: queue, templateItem: item)
-        } else {
-            queue.insert(item, after: nil)
-        }
-        queue.volume = Float(viewModel.preset.volume)
-        bakedPlayer = queue
-        host?.player = queue
-        queue.play()
-    }
-
-    private func stopBakedPlayback() {
-        bakedPlayer?.pause()
-        bakedLooper?.disableLooping()
-        bakedLooper = nil
-        bakedPlayer = nil
-        host?.player = nil
     }
 }

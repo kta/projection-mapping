@@ -87,8 +87,12 @@ struct FrameComposer: Sendable {
 
     /// メッシュワープ(F-MESH-1): ソース片を(rows-1)×(cols-1)セルへ軸平行分割し、
     /// 各セルを対応する制御点quadへホモグラフィ変換して合成する。
-    /// 隣接セルは制御点(エッジ)を共有するため、境界は連続する(区分的射影変換)。
-    /// フェザーは分割前に適用済みなので、セル境界に切れ目は出ない。
+    /// 隣接セルは制御点(エッジ)を共有するため、幾何としては境界が連続する(区分的射影変換)。
+    ///
+    /// ただし各セルを個別に `composited(over:)` で積むと、セル境界の
+    /// アンチエイリアス帯(定義域の外は透明黒)が重なって暗い格子状のシームが出る。
+    /// これを避けるため、ソース側のセル矩形を**半画素ぶん外側へ広げて重ね代を作る**。
+    /// 隣接セルが互いの半透明帯を埋めるので、境界が暗くならない。
     private func meshWarped(_ image: CIImage, mesh: WarpMesh, canvasSize: CGSize) -> CIImage {
         let extent = image.extent
         var acc = CIImage.empty()
@@ -99,22 +103,36 @@ struct FrameComposer: Sendable {
                 let v0 = CGFloat(r) / CGFloat(mesh.rows - 1)
                 let v1 = CGFloat(r + 1) / CGFloat(mesh.rows - 1)
                 // 正規化セル(左上原点) → ソース片extent内のCI矩形 → 原点へ平行移動
-                let srcRect = CoordinateMapper.ciRect(
+                let cellRect = CoordinateMapper.ciRect(
                     fromNormalized: CGRect(x: u0, y: v0, width: u1 - u0, height: v1 - v0),
                     in: extent)
+                // 出力側のセル4隅(CIピクセル座標)
+                let dst = [
+                    CoordinateMapper.ciPixel(fromNormalized: mesh.point(row: r, col: c),
+                                             canvasSize: canvasSize),
+                    CoordinateMapper.ciPixel(fromNormalized: mesh.point(row: r, col: c + 1),
+                                             canvasSize: canvasSize),
+                    CoordinateMapper.ciPixel(fromNormalized: mesh.point(row: r + 1, col: c + 1),
+                                             canvasSize: canvasSize),
+                    CoordinateMapper.ciPixel(fromNormalized: mesh.point(row: r + 1, col: c),
+                                             canvasSize: canvasSize),
+                ]
+                // ソースと出力を「同じ倍率で中心から広げる」ことで写像を保ったまま重ね代を作る。
+                // 出力側だけ、あるいはソース側だけを広げると写像がずれるので必ず両方に掛ける。
+                let k = Self.bleedFactor(for: dst)
+                let srcRect = Self.scaled(cellRect, by: k).intersection(extent)
+                guard !srcRect.isNull, srcRect.width > 0, srcRect.height > 0 else { continue }
+                let expanded = Self.scaled(dst, by: k)
+
                 let cell = image.cropped(to: srcRect)
                     .transformed(by: CGAffineTransform(translationX: -srcRect.minX,
                                                        y: -srcRect.minY))
                 let warp = CIFilter.perspectiveTransform()
                 warp.inputImage = cell
-                warp.topLeft = CoordinateMapper.ciPixel(
-                    fromNormalized: mesh.point(row: r, col: c), canvasSize: canvasSize)
-                warp.topRight = CoordinateMapper.ciPixel(
-                    fromNormalized: mesh.point(row: r, col: c + 1), canvasSize: canvasSize)
-                warp.bottomRight = CoordinateMapper.ciPixel(
-                    fromNormalized: mesh.point(row: r + 1, col: c + 1), canvasSize: canvasSize)
-                warp.bottomLeft = CoordinateMapper.ciPixel(
-                    fromNormalized: mesh.point(row: r + 1, col: c), canvasSize: canvasSize)
+                warp.topLeft = expanded[0]
+                warp.topRight = expanded[1]
+                warp.bottomRight = expanded[2]
+                warp.bottomLeft = expanded[3]
                 if let out = warp.outputImage {
                     acc = out.composited(over: acc)
                 }
@@ -123,10 +141,46 @@ struct FrameComposer: Sendable {
         return acc
     }
 
-    /// 出力マスク(F-MASK-1): 黒い矩形を指定quadへワープしたもの
+    /// セル境界のシーム対策の倍率。出力セルが約0.5px外側へ広がる大きさを返す。
+    /// セルが極端に小さい場合でも広げすぎないよう上限を設ける。
+    static func bleedFactor(for corners: [CGPoint]) -> CGFloat {
+        guard !corners.isEmpty else { return 1 }
+        let cx = corners.map(\.x).reduce(0, +) / CGFloat(corners.count)
+        let cy = corners.map(\.y).reduce(0, +) / CGFloat(corners.count)
+        let radii = corners.map { hypot($0.x - cx, $0.y - cy) }
+        let mean = radii.reduce(0, +) / CGFloat(radii.count)
+        guard mean > 1 else { return 1 }
+        return min(1 + 0.5 / mean, 1.02)
+    }
+
+    /// 矩形を中心から等方に拡大する
+    static func scaled(_ rect: CGRect, by k: CGFloat) -> CGRect {
+        let dx = rect.width * (k - 1) / 2
+        let dy = rect.height * (k - 1) / 2
+        return rect.insetBy(dx: -dx, dy: -dy)
+    }
+
+    /// 4点を重心から等方に拡大する
+    static func scaled(_ corners: [CGPoint], by k: CGFloat) -> [CGPoint] {
+        guard !corners.isEmpty else { return corners }
+        let cx = corners.map(\.x).reduce(0, +) / CGFloat(corners.count)
+        let cy = corners.map(\.y).reduce(0, +) / CGFloat(corners.count)
+        return corners.map {
+            CGPoint(x: cx + ($0.x - cx) * k, y: cy + ($0.y - cy) * k)
+        }
+    }
+
+    /// 出力マスク(F-MASK-1): 黒い矩形を指定quadへワープしたもの。
+    ///
+    /// 元画像は**キャンバスと同じ大きさ**にすること。100×100の小さな画像を拡大すると、
+    /// ソース側1画素ぶんのアンチエイリアス帯が拡大率倍に引き伸ばされ、
+    /// 4Kキャンバスの幅50%マスクで20px近く縁がぼける。
+    /// マスクは「光を当てたくない場所を遮る」ためのものなので、境界は締まっている必要がある。
     private func blackQuad(_ quad: Quad, canvasSize: CGSize) -> CIImage {
+        let w = max(canvasSize.width, 1)
+        let h = max(canvasSize.height, 1)
         let base = CIImage(color: .black)
-            .cropped(to: CGRect(x: 0, y: 0, width: 100, height: 100))
+            .cropped(to: CGRect(x: 0, y: 0, width: w, height: h))
         return singleWarp(base, quad: quad, canvasSize: canvasSize)
     }
 
