@@ -441,13 +441,9 @@ struct MeshCanvasView: View {
 
     // MARK: - 描画ヘルパー
 
-    /// 面の識別色(TestPatternGeneratorと一致させる)
+    /// 面の識別色。定義は Surface.identityRGB(唯一の置き場)。
     private func color(for s: Surface) -> Color {
-        switch s {
-        case .leftWall: return .cyan
-        case .frontWall: return Color(red: 1, green: 0, blue: 1) // マゼンタ
-        case .floor: return .yellow
-        }
+        Surface.swiftUIColor(s)
     }
 
     /// 正規化Quad → キャンバス内UI座標のPath

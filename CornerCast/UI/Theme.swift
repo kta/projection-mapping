@@ -1,5 +1,21 @@
 import SwiftUI
 
+extension Surface {
+    /// 面の識別色(SwiftUI版)。値の定義は Domain の `identityRGB` が唯一の置き場。
+    /// SwiftUI のシステム色(`Color.cyan` 等)を使わないこと —
+    /// 投影側の純RGBと色相が数十度ずれ、同じ面が壁と画面で違う色に見える。
+    static func swiftUIColor(_ surface: Surface) -> Color {
+        let rgb = surface.identityRGB
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    /// 自由面(F-FREE-1)の識別色(SwiftUI版)
+    static var extraSurfaceColor: Color {
+        let rgb = Surface.extraSurfaceRGB
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+}
+
 /// アプリ共通の配色(v1.6: 白ベースの優しいトーン)。
 ///
 /// デザイン方針:

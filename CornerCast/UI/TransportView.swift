@@ -138,6 +138,13 @@ struct TransportView: View {
             Label("この設定で書き出し", systemImage: "square.and.arrow.down.on.square")
         }
         .disabled(bakeableURL == nil || isExporting)
+        // 無言でグレーアウトしない。書き出せない理由を示す。
+        .help(bakeableURL == nil ? "動画を選ぶと書き出せます" : "")
+        if bakeableURL == nil && !isExporting {
+            Text("動画を選ぶと書き出せます")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var exportOverlay: some View {

@@ -72,6 +72,13 @@ struct InspectorView: View {
         }
     }
 
+    /// 選択中の面でメッシュワープが有効か。
+    /// 有効なら quad 由来の操作(十字キー・座標入力)は出力に効かない。
+    private var isMeshEnabledForSelection: Bool {
+        guard let s = viewModel.selectedSurface else { return false }
+        return viewModel.preset.surfaces[s]?.mesh != nil
+    }
+
     /// 面Pickerの選択。面を選んだら自由面・マスクの選択は解除する(排他)。
     private var surfacePickerBinding: Binding<Surface?> {
         Binding(
@@ -118,7 +125,17 @@ struct InspectorView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .disabled(viewModel.isEditLocked)
+                .disabled(viewModel.isEditLocked || isMeshEnabledForSelection)
+
+                // メッシュ有効面では合成が quad を無視してメッシュ点だけを使う。
+                // 十字キーと座標入力は quad を動かすので、押しても出力が一切変わらない
+                // 「死んだコントロール」になる。無言で効かないままにせず理由を出す。
+                if isMeshEnabledForSelection {
+                    Text("この面はメッシュワープが有効です。メッシュ点の微調整は未対応のため、"
+                         + "位置はキャンバス上のメッシュ点をドラッグして調整してください。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 Text("点を選択すると微調整できます")
                     .foregroundStyle(.secondary).font(.caption)

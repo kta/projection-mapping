@@ -31,6 +31,24 @@ enum Surface: String, Codable, CaseIterable, Identifiable, Sendable, CodingKeyRe
 
     /// 合成時の描画順(先に描いたものが下)。要件F-WARP-3: 床 → 左壁 → 正面壁。
     static let drawOrder: [Surface] = [.floor, .leftWall, .frontWall]
+
+    /// 面の識別色(左壁=シアン / 正面壁=マゼンタ / 床=イエロー)。
+    ///
+    /// **定義はここ1箇所だけにすること。** テストパターン・ガイドPNG・編集キャンバス・
+    /// クロップ編集・かんたんセットアップの5箇所で個別に書いていた頃は、
+    /// 投影側が純RGB、画面側がSwiftUIのシステム色、さらに1箇所だけ別のピンクと
+    /// 3系統に分かれていた(ΔE76で最大48)。
+    /// SwiftUIに `Color.magenta` は無いのでRGB直値で揃える。
+    var identityRGB: (red: Double, green: Double, blue: Double) {
+        switch self {
+        case .leftWall: (0, 1, 1)
+        case .frontWall: (1, 0, 1)
+        case .floor: (1, 1, 0)
+        }
+    }
+
+    /// 自由面(F-FREE-1)の識別色
+    static let extraSurfaceRGB: (red: Double, green: Double, blue: Double) = (0, 1, 0)
 }
 
 /// 射影変換先の四角形。正規化座標(左上原点)。

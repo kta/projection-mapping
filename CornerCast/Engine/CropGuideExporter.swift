@@ -67,11 +67,9 @@ enum CropGuideExporter {
         String(format: "x:%.2f y:%.2f w:%.2f h:%.2f", r.minX, r.minY, r.width, r.height)
     }
 
+    /// 定義は Surface.identityRGB(唯一の置き場)。
     private static func identityColor(for surface: Surface) -> UIColor {
-        switch surface {
-        case .leftWall: return .cyan
-        case .frontWall: return .magenta
-        case .floor: return .yellow
-        }
+        let rgb = surface.identityRGB
+        return UIColor(red: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
     }
 }

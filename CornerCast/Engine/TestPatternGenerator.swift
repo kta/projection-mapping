@@ -116,14 +116,10 @@ final class TestPatternGenerator: FrameSource {
         text.draw(at: origin, withAttributes: attributes)
     }
 
-    /// 面ごとの識別色(左壁=シアン / 正面壁=マゼンタ / 床=イエロー / 自由面=グリーン)
+    /// 面ごとの識別色。定義は Surface.identityRGB(唯一の置き場)。
     private static func identityColor(for surface: Surface?) -> UIColor {
-        switch surface {
-        case .leftWall: .cyan
-        case .frontWall: .magenta
-        case .floor: .yellow
-        case nil: .green
-        }
+        let rgb = surface?.identityRGB ?? Surface.extraSurfaceRGB
+        return UIColor(red: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
     }
 
     /// crop矩形群からキャッシュキーを作る(quadは含めない)

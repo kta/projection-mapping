@@ -46,6 +46,15 @@ struct CropEditorView: View {
                 ToolbarItem(placement: .primaryAction) {
                     guideShareLink
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    // クロップだけを既定へ戻す。12点の調整は保つ。
+                    Button {
+                        viewModel.resetCrops()
+                    } label: {
+                        Label("クロップを既定に戻す", systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(viewModel.isEditLocked)
+                }
             }
             .onAppear {
                 sourceImage = EditorPreviewRenderer.shared.sourcePreview(
@@ -210,11 +219,8 @@ struct CropEditorView: View {
         guideURL = url
     }
 
+    /// 定義は Surface.identityRGB(唯一の置き場)。
     static func color(for s: Surface) -> Color {
-        switch s {
-        case .leftWall: return .cyan
-        case .frontWall: return Color(red: 1, green: 0, blue: 1)
-        case .floor: return .yellow
-        }
+        Surface.swiftUIColor(s)
     }
 }

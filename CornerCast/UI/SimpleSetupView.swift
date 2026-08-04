@@ -90,7 +90,8 @@ struct SimpleSetupView: View {
         case 4:
             return "写真アプリやファイルから、お好きな動画や写真をえらべます。"
         default:
-            return "あとから右上のボタンで、いつでも調整しなおせます。"
+            // 「新規」ボタンは .topBarLeading = 左上にある(EditorView)。
+            return "あとから左上の「新規」から、いつでも調整しなおせます。"
         }
     }
 
@@ -294,12 +295,10 @@ private struct SimpleAdjustCanvas: View {
         viewModel.preset.calibrationFingerprint
     }
 
+    /// 定義は Surface.identityRGB(唯一の置き場)。
+    /// 以前ここだけ別のピンクを使っており、同じ面が投影と画面で違う色に見えていた。
     private var color: Color {
-        switch surface {
-        case .leftWall: return .cyan
-        case .frontWall: return Color(red: 1, green: 0.26, blue: 0.85)
-        case .floor: return .yellow
-        }
+        Surface.swiftUIColor(surface)
     }
 
     private func quadPath(_ q: Quad, in rect: CGRect) -> Path {

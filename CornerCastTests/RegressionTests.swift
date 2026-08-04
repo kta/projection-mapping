@@ -217,7 +217,7 @@ final class SanitizeTests: XCTestCase {
     func testNonFiniteValuesAreReplaced() {
         let p = presetWith {
             $0.surfaces[.frontWall]?.brightness = .nan
-            $0.surfaces[.frontWall]?.quad.topLeft = CGPoint(x: .nan, y: .infinity)
+            $0.surfaces[.frontWall]?.quad.topLeft = CGPoint(x: CGFloat.nan, y: CGFloat.infinity)
         }
         let result = p.sanitized()
         XCTAssertTrue(result.changed)
@@ -229,7 +229,7 @@ final class SanitizeTests: XCTestCase {
     /// sanitized を通した preset は必ずエンコードできる(自動保存が死なない)
     func testSanitizedPresetIsAlwaysEncodable() throws {
         let p = presetWith {
-            $0.surfaces[.floor]?.quad.bottomRight = CGPoint(x: .nan, y: .nan)
+            $0.surfaces[.floor]?.quad.bottomRight = CGPoint(x: CGFloat.nan, y: CGFloat.nan)
             $0.volume = .infinity
         }
         let encoder = JSONEncoder()

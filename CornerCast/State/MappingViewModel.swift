@@ -175,6 +175,21 @@ final class MappingViewModel {
         preset.updatedAt = .now
     }
 
+    /// クロップだけを既定へ戻す(F-CROP-1)。
+    /// 12点の調整は保ったまま、切り出し領域だけをやり直したいことがある。
+    /// resetAll は quad まで戻してしまうため、別の入口が要る。
+    func resetCrops() {
+        guard !isEditLocked else { return }
+        pushUndo()
+        let def = MappingPreset.makeDefault()
+        for s in Surface.allCases {
+            if let crop = def.surfaces[s]?.crop {
+                preset.surfaces[s]?.crop = crop
+            }
+        }
+        preset.updatedAt = .now
+    }
+
     /// setCrop/setExtraCropで共有するクランプ規則(0-1・最小サイズ5%)。
     /// 実体は SurfaceConfig 側に置き、デコード時の sanitize と同一規則を共有する。
     static func clampedCrop(_ rect: CGRect) -> CGRect {
