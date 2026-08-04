@@ -27,7 +27,16 @@ final class PresetSchemaTests: XCTestCase {
 
 final class PresetStoreRoundTripTests: XCTestCase {
 
-    private let store = PresetStore()
+    // 本番の Documents を使わないこと。既定のままだと実機/シミュレータで
+    // 調整した lastUsed.json をテスト実行が実際に上書きしてしまう。
+    private let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CornerCastTests-\(UUID().uuidString)", isDirectory: true)
+    private lazy var store = PresetStore(rootDirectory: root)
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: root)
+        super.tearDown()
+    }
 
     func testSaveListDeleteRoundTrip() throws {
         var preset = MappingPreset.makeDefault()

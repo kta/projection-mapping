@@ -29,6 +29,24 @@ struct InspectorView: View {
 
     @ViewBuilder private var selectionSection: some View {
         Section("選択中の頂点") {
+            // 面と頂点をここから選べるようにしておくこと。
+            // キャンバスのハンドルは DragGesture でしか選択できないため、
+            // VoiceOver・外部キーボード・マウスのユーザーは
+            // 「点を選ぶ」という前段に到達できず、12点調整そのものが行えなかった。
+            Picker("面", selection: surfacePickerBinding) {
+                Text("未選択").tag(Surface?.none)
+                ForEach(Surface.allCases) { s in
+                    Text(s.displayName).tag(Surface?.some(s))
+                }
+            }
+            Picker("頂点", selection: cornerPickerBinding) {
+                Text("未選択").tag(Quad.Corner?.none)
+                ForEach(Quad.Corner.allCases) { c in
+                    Text(cornerName(c)).tag(Quad.Corner?.some(c))
+                }
+            }
+            .disabled(viewModel.selectedSurface == nil)
+
             if let s = viewModel.selectedSurface, let c = viewModel.selectedCorner {
                 Text("\(s.displayName) / \(cornerName(c))")
                     .font(.subheadline).bold()
@@ -54,18 +72,50 @@ struct InspectorView: View {
         }
     }
 
+    /// 面Pickerの選択。面を選んだら自由面・マスクの選択は解除する(排他)。
+    private var surfacePickerBinding: Binding<Surface?> {
+        Binding(
+            get: { viewModel.selectedSurface },
+            set: { newValue in
+                viewModel.selectedSurface = newValue
+                if newValue != nil {
+                    viewModel.selectedExtraID = nil
+                    viewModel.selectedMaskID = nil
+                    if viewModel.selectedCorner == nil { viewModel.selectedCorner = .topLeft }
+                } else {
+                    viewModel.selectedCorner = nil
+                }
+            }
+        )
+    }
+
+    private var cornerPickerBinding: Binding<Quad.Corner?> {
+        Binding(
+            get: { viewModel.selectedCorner },
+            set: { viewModel.selectedCorner = $0 }
+        )
+    }
+
     // MARK: 2. 微調整十字キー(F-UI-3)
 
     @ViewBuilder private var nudgeSection: some View {
         Section("微調整(±1px)") {
             if let s = viewModel.selectedSurface, let c = viewModel.selectedCorner {
                 VStack(spacing: 8) {
-                    NudgeButton(systemName: "arrow.up") { viewModel.nudge(corner: c, of: s, dx: 0, dy: -1) }
-                    HStack(spacing: 24) {
-                        NudgeButton(systemName: "arrow.left") { viewModel.nudge(corner: c, of: s, dx: -1, dy: 0) }
-                        NudgeButton(systemName: "arrow.right") { viewModel.nudge(corner: c, of: s, dx: 1, dy: 0) }
+                    NudgeButton(systemName: "arrow.up", accessibilityName: "上へ1ピクセル") {
+                        viewModel.nudge(corner: c, of: s, dx: 0, dy: -1)
                     }
-                    NudgeButton(systemName: "arrow.down") { viewModel.nudge(corner: c, of: s, dx: 0, dy: 1) }
+                    HStack(spacing: 24) {
+                        NudgeButton(systemName: "arrow.left", accessibilityName: "左へ1ピクセル") {
+                            viewModel.nudge(corner: c, of: s, dx: -1, dy: 0)
+                        }
+                        NudgeButton(systemName: "arrow.right", accessibilityName: "右へ1ピクセル") {
+                            viewModel.nudge(corner: c, of: s, dx: 1, dy: 0)
+                        }
+                    }
+                    NudgeButton(systemName: "arrow.down", accessibilityName: "下へ1ピクセル") {
+                        viewModel.nudge(corner: c, of: s, dx: 0, dy: 1)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .disabled(viewModel.isEditLocked)
@@ -355,9 +405,18 @@ struct InspectorView: View {
 /// 十字キー1つぶん。タップで1回、長押しで0.1秒間隔のリピート(F-UI-3)。
 private struct NudgeButton: View {
     let systemName: String
+    let accessibilityName: String
     let action: () -> Void
 
-    @State private var timer: Timer?
+    /// リピートは Timer ではなく Task で回す。
+    ///
+    /// Timer.scheduledTimer は RunLoop が強参照するため、押下中にビューが階層から
+    /// 外れると(面を追加した・テンプレートを適用した等で選択が nil になる)
+    /// onPressingChanged(false) が届かず invalidate されないまま 10Hz で発火し続けた。
+    /// しかもクロージャが「押下した瞬間の action」を焼き付けるので、
+    /// 選択していない面の頂点が勝手に動き、`preset` の更新が続くせいで
+    /// 500ms デバウンスの自動保存が永久に完走しなくなる。
+    @State private var repeatTask: Task<Void, Never>?
 
     var body: some View {
         Image(systemName: systemName)
@@ -370,24 +429,30 @@ private struct NudgeButton: View {
                 action()
             }
             .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 20) {
-                // 長押し確定 → リピート開始
                 startRepeat()
             } onPressingChanged: { pressing in
                 if !pressing { stopRepeat() }
             }
+            // ビューが消えるときの取りこぼしを塞ぐ最後の砦
+            .onDisappear { stopRepeat() }
+            .accessibilityLabel(accessibilityName)
+            .accessibilityAddTraits(.isButton)
     }
 
     private func startRepeat() {
         stopRepeat()
         action()   // 確定直後に1発
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            // Timerコールバックはnonisolated。メインスレッドで発火するためassumeIsolatedで包む。
-            MainActor.assumeIsolated { action() }
+        repeatTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                action()
+            }
         }
     }
 
     private func stopRepeat() {
-        timer?.invalidate()
-        timer = nil
+        repeatTask?.cancel()
+        repeatTask = nil
     }
 }

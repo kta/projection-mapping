@@ -14,6 +14,8 @@ struct ControlSettingsView: View {
     @State private var portText = "\(ControlHub.defaultPort)"
     @State private var midiEnabled = false
     @State private var isRunning = false
+    /// 起動に失敗した理由(ポート衝突など)
+    @State private var errorMessage: String?
 
     /// 検証済みポート(1024-65535)。不正なら nil。
     private var parsedPort: Int? {
@@ -86,13 +88,22 @@ struct ControlSettingsView: View {
     private var statusSection: some View {
         Section("状態") {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(isRunning ? Color.green : Color.secondary)
-                    .frame(width: 10, height: 10)
+                // 色だけに頼らず形でも区別する
+                Image(systemName: isRunning ? "circle.fill" : "circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(isRunning ? Color.green : Color.secondary)
                 Text(isRunning ? "OSC受信中" : "停止中")
                 Spacer()
                 Button("再読み込み", action: syncFromHub)
                     .font(.caption)
+            }
+            .accessibilityElement(children: .combine)
+            // ポートを取れなかった理由を必ず出す。
+            // 「設定はONなのに停止中」という表示だけでは原因が分からない。
+            if let error = errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -139,6 +150,7 @@ struct ControlSettingsView: View {
         portText = "\(hub.oscPort)"
         midiEnabled = hub.midiEnabled
         isRunning = hub.isRunning
+        errorMessage = hub.lastErrorMessage
     }
 
     private func apply() {
@@ -146,5 +158,6 @@ struct ControlSettingsView: View {
         let hub = AppServices.shared.controlHub
         hub.applySettings(oscEnabled: oscEnabled, oscPort: port, midiEnabled: midiEnabled)
         isRunning = hub.isRunning
+        errorMessage = hub.lastErrorMessage
     }
 }

@@ -82,10 +82,18 @@ struct MeshCanvasView: View {
                 // .task(id:) はキー変化時に前回タスクを自動キャンセルする。
                 try? await Task.sleep(for: .milliseconds(120))
                 guard !Task.isCancelled else { return }
-                previewImage = EditorPreviewRenderer.shared.render(
-                    preset: viewModel.preset,
-                    content: viewModel.contentSource,
-                    size: CGSize(width: 640, height: 360))
+                renderPreview()
+            }
+            // 再生中はプレビューも動かす(F-OUT-4)。
+            // 以前はワープ設定が変わったときにしか再描画せず、動画を選んでも
+            // 先頭フレームの静止画が1枚出るだけだった。12fpsで十分に見える。
+            .task(id: isPlayingContent) {
+                guard isPlayingContent else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(83))
+                    guard !Task.isCancelled else { return }
+                    renderPreview()
+                }
             }
         }
         .background(Color(.secondarySystemBackground))
@@ -388,6 +396,34 @@ struct MeshCanvasView: View {
         return .handled
     }
 
+    /// 頂点の日本語名(アクセシビリティ・インスペクタで共有する)
+    static func cornerName(_ c: Quad.Corner) -> String {
+        switch c {
+        case .topLeft: "左上"
+        case .topRight: "右上"
+        case .bottomRight: "右下"
+        case .bottomLeft: "左下"
+        }
+    }
+
+    /// 座標の読み上げ表現。パーセントで伝える(正規化座標の生値は意味が取れない)。
+    static func positionDescription(_ p: CGPoint) -> String {
+        "横 \(Int((p.x * 100).rounded()))パーセント、縦 \(Int((p.y * 100).rounded()))パーセント"
+    }
+
+    private func renderPreview() {
+        previewImage = EditorPreviewRenderer.shared.render(
+            preset: viewModel.preset,
+            content: viewModel.contentSource,
+            size: CGSize(width: 640, height: 360))
+    }
+
+    /// 動く絵を表示すべき状態か(再生中の動画のときだけ連続再描画する)
+    private var isPlayingContent: Bool {
+        guard case .video = viewModel.contentSource else { return false }
+        return viewModel.playback?.isPlaying ?? false
+    }
+
     /// プレビュー再描画のトリガキー(ワープ結果に影響する状態のみ)
     private var previewKey: String {
         viewModel.preset.calibrationFingerprint + "|" + Self.contentKey(viewModel.contentSource)
@@ -526,7 +562,37 @@ private struct ControlPoint: View {
         .position(pos)
         .allowsHitTesting(!viewModel.isEditLocked)   // ロック時は操作不能(F-UI-6)
         .gesture(dragGesture)
+        // VoiceOver対応(F-UI-1)。
+        // DragGesture だけだと VoiceOver からは操作できず、頂点選択にすら到達できないため
+        // 12点調整という主機能が丸ごと使えなくなる。
+        // ラベルには面と頂点の両方を入れること(4点が同じ読み上げになると区別できない)。
+        .accessibilityElement()
+        .accessibilityLabel("\(surface.displayName) \(MeshCanvasView.cornerName(corner))")
+        .accessibilityValue(MeshCanvasView.positionDescription(normalized))
+        .accessibilityHint("上下にスワイプすると位置を調整します")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        // ダブルタップで選択
+        .accessibilityAction {
+            viewModel.selectedSurface = surface
+            viewModel.selectedCorner = corner
+            viewModel.selectedExtraID = nil
+            viewModel.selectedMaskID = nil
+        }
+        // 上下スワイプで±1px。軸の切替はカスタムアクションで提供する。
+        .accessibilityAdjustableAction { direction in
+            let step: Double = direction == .increment ? 1 : -1
+            switch adjustAxis {
+            case .horizontal: viewModel.nudge(corner: corner, of: surface, dx: step, dy: 0)
+            case .vertical: viewModel.nudge(corner: corner, of: surface, dx: 0, dy: step)
+            }
+        }
+        .accessibilityAction(named: adjustAxis == .horizontal ? "縦方向を調整" : "横方向を調整") {
+            adjustAxis = adjustAxis == .horizontal ? .vertical : .horizontal
+        }
     }
+
+    /// VoiceOverの上下スワイプで動かす軸
+    @State private var adjustAxis: Axis = .horizontal
 
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named(spaceName))

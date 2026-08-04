@@ -323,6 +323,8 @@ private struct BigHandle: View {
     let color: Color
 
     @State private var began = false
+    /// VoiceOverの上下スワイプで動かす軸
+    @State private var adjustAxis: Axis = .horizontal
 
     var body: some View {
         let normalized = viewModel.preset.surfaces[surface]?.quad[corner] ?? .zero
@@ -348,7 +350,22 @@ private struct BigHandle: View {
                 }
                 .onEnded { _ in began = false }
         )
-        .accessibilityLabel("\(surface.displayName)の角")
-        .accessibilityHint("ドラッグして部屋の角に合わせます")
+        // 4隅すべてが同じラベルだと VoiceOver では区別できない。頂点名を必ず含める。
+        // ヒントも「ドラッグして」ではなく、VoiceOverで実際に行える操作を書く。
+        .accessibilityElement()
+        .accessibilityLabel("\(surface.displayName) \(MeshCanvasView.cornerName(corner))")
+        .accessibilityValue(MeshCanvasView.positionDescription(
+            viewModel.preset.surfaces[surface]?.quad[corner] ?? .zero))
+        .accessibilityHint("上下にスワイプすると位置を調整します")
+        .accessibilityAdjustableAction { direction in
+            let step: Double = direction == .increment ? 1 : -1
+            switch adjustAxis {
+            case .horizontal: viewModel.nudge(corner: corner, of: surface, dx: step, dy: 0)
+            case .vertical: viewModel.nudge(corner: corner, of: surface, dx: 0, dy: step)
+            }
+        }
+        .accessibilityAction(named: adjustAxis == .horizontal ? "縦方向を調整" : "横方向を調整") {
+            adjustAxis = adjustAxis == .horizontal ? .vertical : .horizontal
+        }
     }
 }

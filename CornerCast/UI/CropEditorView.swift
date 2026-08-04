@@ -51,10 +51,16 @@ struct CropEditorView: View {
                 sourceImage = EditorPreviewRenderer.shared.sourcePreview(
                     content: viewModel.contentSource,
                     size: CGSize(width: 640, height: 360))
-                prepareGuide()
             }
-            .onChange(of: viewModel.preset.calibrationFingerprint) { _, _ in
-                prepareGuide()
+            // ガイドPNGの生成は 1920×1080 のラスタライズ + PNGエンコード + ディスク書き込みで
+            // 数十msかかる。クロップのドラッグは onChanged が毎イベント発火するので、
+            // これを同期で回すと編集UIだけでなく**投影のフレームまで落ちる**
+            // (出力の CADisplayLink も .main ランループ上にあるため)。
+            // 変化が落ち着いてから1回だけ、しかもメインアクタの外で作る。
+            .task(id: viewModel.preset.calibrationFingerprint) {
+                try? await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled else { return }
+                await prepareGuide()
             }
         }
     }
@@ -185,21 +191,23 @@ struct CropEditorView: View {
         }
     }
 
-    /// 現在のクロップ構成からガイドPNGをtmpへ生成し、ShareLink対象にする
-    private func prepareGuide() {
-        guard let data = CropGuideExporter.pngData(preset: viewModel.preset) else {
-            guideURL = nil
-            return
-        }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("CornerCast-CropGuide")
-            .appendingPathExtension("png")
-        do {
-            try data.write(to: url, options: .atomic)
-            guideURL = url
-        } catch {
-            guideURL = nil
-        }
+    /// 現在のクロップ構成からガイドPNGをtmpへ生成し、ShareLink対象にする。
+    /// ラスタライズと書き込みはメインアクタの外で行う(投影のフレームを落とさないため)。
+    private func prepareGuide() async {
+        let preset = viewModel.preset
+        let url = await Task.detached(priority: .utility) { () -> URL? in
+            guard let data = CropGuideExporter.pngData(preset: preset) else { return nil }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("CornerCast-CropGuide")
+                .appendingPathExtension("png")
+            do {
+                try data.write(to: url, options: .atomic)
+                return url
+            } catch {
+                return nil
+            }
+        }.value
+        guideURL = url
     }
 
     static func color(for s: Surface) -> Color {
